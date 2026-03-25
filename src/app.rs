@@ -17,6 +17,7 @@ use crate::events::{AppEvent, BackgroundCommand, FileChangeEvent, LspEvent};
 use crate::input::{Action, FocusArea, InputHandler, KeymapSet};
 use crate::ui::buffer::Buffer;
 use crate::ui::command_palette::CommandPalette;
+use crate::ui::editor::TabContent;
 use crate::ui::completion::CompletionPopup;
 use crate::ui::editor::EditorPane;
 use crate::ui::confirm_dialog::{ConfirmAction, ConfirmDialog, ConfirmResult};
@@ -93,6 +94,7 @@ impl App {
             let term_size = terminal.size()?;
             let term_rect = ratatui::layout::Rect::new(0, 0, term_size.width, term_size.height);
             self.editor.sync_viewport(term_rect);
+
 
             // Render
             terminal.draw(|frame| {
@@ -242,9 +244,9 @@ impl App {
     fn execute_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::Quit => {
-                // Check if any buffer has unsaved changes
-                if let Some(idx) = self.editor.buffers.iter().position(|b| b.is_modified()) {
-                    let name = self.editor.buffers[idx].name();
+                // Check if any tab has unsaved changes
+                if let Some(idx) = self.editor.tabs.iter().position(|t| t.is_modified()) {
+                    let name = self.editor.tabs[idx].name();
                     self.confirm_dialog.show(name, ConfirmAction::Quit);
                 } else {
                     self.running = false;
@@ -270,14 +272,14 @@ impl App {
                 self.focus = FocusArea::Editor;
             }
             AppCommand::SaveCurrentFile => {
-                if let Err(e) = self.editor.save_active_buffer() {
+                if let Err(e) = self.editor.save_active_tab() {
                     log::error!("Failed to save file: {}", e);
                 }
             }
             AppCommand::CloseCurrentTab => {
-                if let Some(buf) = self.editor.active_buffer() {
-                    if buf.is_modified() {
-                        let name = buf.name();
+                if let Some(tab) = self.editor.tabs.get(self.editor.tab_bar.active) {
+                    if tab.is_modified() {
+                        let name = tab.name();
                         let idx = self.editor.tab_bar.active;
                         self.confirm_dialog.show(name, ConfirmAction::CloseTab(idx));
                         return;
@@ -373,13 +375,13 @@ impl App {
             ConfirmResult::Save => {
                 match action {
                     ConfirmAction::CloseTab(_idx) => {
-                        let _ = self.editor.save_active_buffer();
+                        let _ = self.editor.save_active_tab();
                         self.editor.close_active_tab();
                     }
                     ConfirmAction::Quit => {
-                        for buf in &mut self.editor.buffers {
-                            if buf.is_modified() {
-                                let _ = buf.document.save();
+                        for tab in &mut self.editor.tabs {
+                            if tab.is_modified() {
+                                let _ = tab.save();
                             }
                         }
                         self.running = false;
@@ -416,11 +418,13 @@ impl App {
                 // Handle buffer reloads for modified files
                 match change {
                     FileChangeEvent::Modified(path) => {
-                        // Find and reload unmodified buffers
-                        for buf in &mut self.editor.buffers {
-                            if buf.file_path() == Some(path.as_path()) && !buf.is_modified() {
-                                if let Ok(new_buf) = Buffer::from_file(&path) {
-                                    *buf = new_buf;
+                        // Find and reload unmodified text buffers
+                        for tab in &mut self.editor.tabs {
+                            if let TabContent::Text(buf) = tab {
+                                if buf.file_path() == Some(path.as_path()) && !buf.is_modified() {
+                                    if let Ok(new_buf) = Buffer::from_file(&path) {
+                                        *buf = new_buf;
+                                    }
                                 }
                             }
                         }
@@ -558,7 +562,7 @@ mod tests {
         let (tmp, mut app) = setup_test_app();
         let path = tmp.path().join("src/main.rs");
         app.execute_command(AppCommand::OpenFile(path));
-        assert_eq!(app.editor.buffers.len(), 1);
+        assert_eq!(app.editor.tabs.len(), 1);
         assert_eq!(app.focus, FocusArea::Editor);
     }
 
@@ -588,7 +592,7 @@ mod tests {
     fn test_close_tab_empty() {
         let (tmp, mut app) = setup_test_app();
         app.execute_command(AppCommand::CloseCurrentTab);
-        assert!(app.editor.buffers.is_empty());
+        assert!(app.editor.tabs.is_empty());
     }
 
     #[test]

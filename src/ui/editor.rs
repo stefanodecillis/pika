@@ -10,13 +10,64 @@ use crate::config::Theme;
 use crate::editor::syntax::SyntaxHighlighter;
 use crate::input::Action;
 use crate::ui::buffer::Buffer;
+use crate::ui::csv_view::CsvView;
 use crate::ui::status_bar::{StatusBar, StatusInfo};
 use crate::ui::tab_bar::TabBar;
 use crate::ui::{AppCommand, Component};
 
+/// Content of a single editor tab — either a plain text buffer or a CSV table view.
+pub enum TabContent {
+    Text(Buffer),
+    Csv(CsvView),
+}
+
+impl TabContent {
+    pub fn name(&self) -> String {
+        match self {
+            TabContent::Text(b) => b.name(),
+            TabContent::Csv(c) => c.name(),
+        }
+    }
+
+    pub fn is_modified(&self) -> bool {
+        match self {
+            TabContent::Text(b) => b.is_modified(),
+            TabContent::Csv(c) => c.is_modified(),
+        }
+    }
+
+    pub fn file_path(&self) -> Option<&Path> {
+        match self {
+            TabContent::Text(b) => b.file_path(),
+            TabContent::Csv(c) => Some(c.file_path()),
+        }
+    }
+
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        match self {
+            TabContent::Text(b) => b.document.save(),
+            TabContent::Csv(c) => c.save(),
+        }
+    }
+
+    pub fn update_viewport(&mut self, height: usize, width: usize) {
+        match self {
+            TabContent::Text(b) => b.update_viewport(height, width),
+            TabContent::Csv(c) => c.update_viewport(height, width),
+        }
+    }
+
+    pub fn handle_action(&mut self, action: &Action) -> AppCommand {
+        match self {
+            TabContent::Text(b) => b.handle_action(action),
+            TabContent::Csv(c) => c.handle_action(action),
+        }
+    }
+}
+
 /// The main editor pane containing tabs and buffers.
 pub struct EditorPane {
-    pub buffers: Vec<Buffer>,
+    pub tabs: Vec<TabContent>,
     pub tab_bar: TabBar,
     pub highlighter: SyntaxHighlighter,
     pub theme: Theme,
@@ -25,7 +76,7 @@ pub struct EditorPane {
 impl EditorPane {
     pub fn new(theme: Theme) -> Self {
         Self {
-            buffers: Vec::new(),
+            tabs: Vec::new(),
             tab_bar: TabBar::new(),
             highlighter: SyntaxHighlighter::new(),
             theme,
@@ -44,50 +95,57 @@ impl EditorPane {
             return Ok(());
         }
 
-        let buffer = Buffer::from_file(path)?;
-        self.buffers.push(buffer);
+        let content = if path.extension().map(|e| e == "csv").unwrap_or(false) {
+            TabContent::Csv(CsvView::from_file(path)?)
+        } else {
+            TabContent::Text(Buffer::from_file(path)?)
+        };
+
+        self.tabs.push(content);
         self.tab_bar.add_tab(name, false);
         Ok(())
     }
 
+    /// Returns the active text buffer, if the active tab is a text file.
     pub fn active_buffer(&self) -> Option<&Buffer> {
-        if self.buffers.is_empty() {
-            return None;
+        match self.tabs.get(self.tab_bar.active) {
+            Some(TabContent::Text(b)) => Some(b),
+            _ => None,
         }
-        self.buffers.get(self.tab_bar.active)
     }
 
+    /// Returns the active text buffer mutably, if the active tab is a text file.
     pub fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
-        if self.buffers.is_empty() {
-            return None;
+        match self.tabs.get_mut(self.tab_bar.active) {
+            Some(TabContent::Text(b)) => Some(b),
+            _ => None,
         }
-        self.buffers.get_mut(self.tab_bar.active)
     }
 
     pub fn close_active_tab(&mut self) -> Option<PathBuf> {
-        if self.buffers.is_empty() {
+        if self.tabs.is_empty() {
             return None;
         }
         let idx = self.tab_bar.active;
-        let path = self.buffers[idx].file_path().map(|p| p.to_path_buf());
-        self.buffers.remove(idx);
+        let path = self.tabs[idx].file_path().map(|p| p.to_path_buf());
+        self.tabs.remove(idx);
         self.tab_bar.close_tab(idx);
         path
     }
 
-    pub fn save_active_buffer(&mut self) -> anyhow::Result<()> {
+    pub fn save_active_tab(&mut self) -> anyhow::Result<()> {
         let idx = self.tab_bar.active;
-        if let Some(buf) = self.buffers.get_mut(idx) {
-            buf.document.save()?;
-            let name = buf.name();
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.save()?;
+            let name = tab.name();
             self.tab_bar.update_tab(idx, name, false);
         }
         Ok(())
     }
 
     pub fn status_info(&self) -> StatusInfo {
-        if let Some(buf) = self.active_buffer() {
-            StatusInfo {
+        match self.tabs.get(self.tab_bar.active) {
+            Some(TabContent::Text(buf)) => StatusInfo {
                 file_name: buf.name(),
                 language: buf.language_id().to_string(),
                 encoding: "UTF-8".to_string(),
@@ -96,32 +154,42 @@ impl EditorPane {
                 cursor_col: buf.cursor.position.col,
                 total_lines: buf.document.line_count(),
                 modified: buf.is_modified(),
-                lsp_status: None, // Will be set by app
-            }
-        } else {
-            StatusInfo::default()
+                lsp_status: None,
+            },
+            Some(TabContent::Csv(csv)) => StatusInfo {
+                file_name: csv.name(),
+                language: "csv".to_string(),
+                encoding: "UTF-8".to_string(),
+                line_ending: "LF".to_string(),
+                cursor_line: csv.cursor_row,
+                cursor_col: csv.cursor_col,
+                total_lines: csv.rows.len(),
+                modified: csv.is_modified(),
+                lsp_status: None,
+            },
+            None => StatusInfo::default(),
         }
     }
 
     fn update_tab_modified(&mut self) {
-        if let Some(buf) = self.buffers.get(self.tab_bar.active) {
-            let modified = buf.is_modified();
-            let name = buf.name();
+        if let Some(tab) = self.tabs.get(self.tab_bar.active) {
+            let modified = tab.is_modified();
+            let name = tab.name();
             self.tab_bar.update_tab(self.tab_bar.active, name, modified);
         }
     }
 
-    /// Update the active buffer's viewport to match the current terminal size.
+    /// Update the active tab's viewport to match the current terminal size.
     /// Must be called before render.
     pub fn sync_viewport(&mut self, area: Rect) {
-        if self.buffers.is_empty() {
+        if self.tabs.is_empty() {
             return;
         }
         // Account for: outer border (2), tab bar (1), status bar (1)
-        let editor_height = area.height.saturating_sub(4) as usize;
-        let editor_width = area.width.saturating_sub(2) as usize;
-        if let Some(buf) = self.buffers.get_mut(self.tab_bar.active) {
-            buf.update_viewport(editor_height, editor_width);
+        let height = area.height.saturating_sub(4) as usize;
+        let width = area.width.saturating_sub(2) as usize;
+        if let Some(tab) = self.tabs.get_mut(self.tab_bar.active) {
+            tab.update_viewport(height, width);
         }
     }
 
@@ -177,8 +245,8 @@ impl Component for EditorPane {
             }
             Action::CloseTab => AppCommand::CloseCurrentTab,
             _ => {
-                let cmd = if let Some(buf) = self.buffers.get_mut(self.tab_bar.active) {
-                    buf.handle_action(action)
+                let cmd = if let Some(tab) = self.tabs.get_mut(self.tab_bar.active) {
+                    tab.handle_action(action)
                 } else {
                     return AppCommand::Nothing;
                 };
@@ -195,77 +263,106 @@ impl Component for EditorPane {
             self.theme.border_color.to_ratatui_color()
         };
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .style(
-                Style::default()
-                    .bg(self.theme.editor_bg.to_ratatui_color())
-                    .fg(self.theme.editor_fg.to_ratatui_color()),
-            );
-
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        if self.buffers.is_empty() {
+        if self.tabs.is_empty() {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .style(
+                    Style::default()
+                        .bg(self.theme.editor_bg.to_ratatui_color())
+                        .fg(self.theme.editor_fg.to_ratatui_color()),
+                );
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
             self.render_welcome(frame, inner);
             return;
         }
 
-        // Layout: tab bar (1 line) + editor content + status bar (1 line)
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // tab bar
-                Constraint::Min(1),    // editor content
-                Constraint::Length(1), // status bar
-            ])
-            .split(inner);
+        match self.tabs.get(self.tab_bar.active) {
+            Some(TabContent::Csv(csv)) => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .style(
+                        Style::default()
+                            .bg(self.theme.editor_bg.to_ratatui_color())
+                            .fg(self.theme.editor_fg.to_ratatui_color()),
+                    );
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
 
-        // Render tab bar
-        self.tab_bar.render(frame, chunks[0], &self.theme);
+                let layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Min(1)])
+                    .split(inner);
 
-        // Render active buffer
-        if let Some(buf) = self.active_buffer() {
-            let editor_area = chunks[1];
+                self.tab_bar.render(frame, layout[0], &self.theme);
+                csv.render_table(frame, layout[1], &self.theme, focused);
+            }
+            Some(TabContent::Text(_)) | None => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .style(
+                        Style::default()
+                            .bg(self.theme.editor_bg.to_ratatui_color())
+                            .fg(self.theme.editor_fg.to_ratatui_color()),
+                    );
 
-            let lines = buf.build_lines(
-                Some(&self.highlighter),
-                &self.theme,
-                editor_area.width as usize,
-            );
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
 
-            let paragraph = Paragraph::new(lines).style(
-                Style::default()
-                    .bg(self.theme.editor_bg.to_ratatui_color())
-                    .fg(self.theme.editor_fg.to_ratatui_color()),
-            );
-            frame.render_widget(paragraph, editor_area);
+                // Layout: tab bar (1 line) + editor content + status bar (1 line)
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // tab bar
+                        Constraint::Min(1),    // editor content
+                        Constraint::Length(1), // status bar
+                    ])
+                    .split(inner);
 
-            // Set cursor position
-            if focused {
-                let (cx, cy) = buf.cursor_screen_position();
-                let cursor_x = editor_area.x + cx;
-                let cursor_y = editor_area.y + cy;
-                if cursor_x < editor_area.x + editor_area.width
-                    && cursor_y < editor_area.y + editor_area.height
-                {
-                    frame.set_cursor_position((cursor_x, cursor_y));
+                self.tab_bar.render(frame, chunks[0], &self.theme);
+
+                if let Some(TabContent::Text(buf)) = self.tabs.get(self.tab_bar.active) {
+                    let editor_area = chunks[1];
+                    let lines = buf.build_lines(
+                        Some(&self.highlighter),
+                        &self.theme,
+                        editor_area.width as usize,
+                    );
+
+                    let paragraph = Paragraph::new(lines).style(
+                        Style::default()
+                            .bg(self.theme.editor_bg.to_ratatui_color())
+                            .fg(self.theme.editor_fg.to_ratatui_color()),
+                    );
+                    frame.render_widget(paragraph, editor_area);
+
+                    if focused {
+                        let (cx, cy) = buf.cursor_screen_position();
+                        let cursor_x = editor_area.x + cx;
+                        let cursor_y = editor_area.y + cy;
+                        if cursor_x < editor_area.x + editor_area.width
+                            && cursor_y < editor_area.y + editor_area.height
+                        {
+                            frame.set_cursor_position((cursor_x, cursor_y));
+                        }
+                    }
                 }
+
+                let info = self.status_info();
+                StatusBar::render(&info, frame, chunks[2], &self.theme);
             }
         }
-
-        // Render status bar
-        let info = self.status_info();
-        StatusBar::render(&info, frame, chunks[2], &self.theme);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn setup_test_file() -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
@@ -274,10 +371,17 @@ mod tests {
         (tmp, file_path)
     }
 
+    fn setup_csv_file() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("data.csv");
+        fs::write(&file_path, "name,age\nAlice,30\nBob,25\n").unwrap();
+        (tmp, file_path)
+    }
+
     #[test]
     fn test_editor_pane_new() {
         let pane = EditorPane::new(Theme::default());
-        assert!(pane.buffers.is_empty());
+        assert!(pane.tabs.is_empty());
         assert!(pane.tab_bar.is_empty());
     }
 
@@ -286,8 +390,17 @@ mod tests {
         let (tmp, path) = setup_test_file();
         let mut pane = EditorPane::new(Theme::default());
         pane.open_file(&path).unwrap();
-        assert_eq!(pane.buffers.len(), 1);
+        assert_eq!(pane.tabs.len(), 1);
         assert_eq!(pane.tab_bar.len(), 1);
+    }
+
+    #[test]
+    fn test_open_csv_file() {
+        let (_tmp, path) = setup_csv_file();
+        let mut pane = EditorPane::new(Theme::default());
+        pane.open_file(&path).unwrap();
+        assert_eq!(pane.tabs.len(), 1);
+        assert!(matches!(pane.tabs[0], TabContent::Csv(_)));
     }
 
     #[test]
@@ -296,7 +409,7 @@ mod tests {
         let mut pane = EditorPane::new(Theme::default());
         pane.open_file(&path).unwrap();
         pane.open_file(&path).unwrap();
-        assert_eq!(pane.buffers.len(), 1); // should not duplicate
+        assert_eq!(pane.tabs.len(), 1); // should not duplicate
     }
 
     #[test]
@@ -306,16 +419,25 @@ mod tests {
         pane.open_file(&path).unwrap();
         let closed = pane.close_active_tab();
         assert!(closed.is_some());
-        assert!(pane.buffers.is_empty());
+        assert!(pane.tabs.is_empty());
     }
 
     #[test]
-    fn test_active_buffer() {
+    fn test_active_buffer_text() {
         let (tmp, path) = setup_test_file();
         let mut pane = EditorPane::new(Theme::default());
         assert!(pane.active_buffer().is_none());
         pane.open_file(&path).unwrap();
         assert!(pane.active_buffer().is_some());
+    }
+
+    #[test]
+    fn test_active_buffer_csv_returns_none() {
+        let (_tmp, path) = setup_csv_file();
+        let mut pane = EditorPane::new(Theme::default());
+        pane.open_file(&path).unwrap();
+        // CSV tab → active_buffer() returns None (it's not a text buffer)
+        assert!(pane.active_buffer().is_none());
     }
 
     #[test]
@@ -339,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_info() {
+    fn test_status_info_text() {
         let (tmp, path) = setup_test_file();
         let mut pane = EditorPane::new(Theme::default());
         pane.open_file(&path).unwrap();
@@ -349,18 +471,26 @@ mod tests {
     }
 
     #[test]
-    fn test_save_active_buffer() {
+    fn test_status_info_csv() {
+        let (_tmp, path) = setup_csv_file();
+        let mut pane = EditorPane::new(Theme::default());
+        pane.open_file(&path).unwrap();
+        let info = pane.status_info();
+        assert_eq!(info.file_name, "data.csv");
+        assert_eq!(info.language, "csv");
+    }
+
+    #[test]
+    fn test_save_active_tab_text() {
         let (tmp, path) = setup_test_file();
         let mut pane = EditorPane::new(Theme::default());
         pane.open_file(&path).unwrap();
 
-        // Modify the buffer
         pane.handle_action(&Action::InsertChar('X'));
-        assert!(pane.active_buffer().unwrap().is_modified());
+        assert!(pane.tabs[0].is_modified());
 
-        // Save
-        pane.save_active_buffer().unwrap();
-        assert!(!pane.active_buffer().unwrap().is_modified());
+        pane.save_active_tab().unwrap();
+        assert!(!pane.tabs[0].is_modified());
     }
 
     #[test]
@@ -378,6 +508,19 @@ mod tests {
 
         let cmd = pane.handle_action(&Action::InsertChar('Z'));
         assert!(matches!(cmd, AppCommand::Nothing));
-        assert!(pane.active_buffer().unwrap().document.line(0).starts_with("Z"));
+        if let TabContent::Text(buf) = &pane.tabs[0] {
+            assert!(buf.document.line(0).starts_with("Z"));
+        }
+    }
+
+    #[test]
+    fn test_csv_navigation_via_pane() {
+        let (_tmp, path) = setup_csv_file();
+        let mut pane = EditorPane::new(Theme::default());
+        pane.open_file(&path).unwrap();
+        pane.handle_action(&Action::CursorDown);
+        if let TabContent::Csv(csv) = &pane.tabs[0] {
+            assert_eq!(csv.cursor_row, 1);
+        }
     }
 }

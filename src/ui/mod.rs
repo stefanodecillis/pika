@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod command_palette;
 pub mod completion;
 pub mod confirm_dialog;
+pub mod csv_view;
 pub mod editor;
 pub mod shortcuts_help;
 pub mod sidebar;
