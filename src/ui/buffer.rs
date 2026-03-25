@@ -15,28 +15,73 @@ use crate::editor::syntax::SyntaxHighlighter;
 use crate::input::Action;
 use crate::ui::{AppCommand, Component};
 
+/// Go-to-line input bar state.
+pub struct GotoLineBar {
+    pub active: bool,
+    pub input: String,
+}
+
+impl GotoLineBar {
+    pub fn new() -> Self {
+        Self { active: false, input: String::new() }
+    }
+    pub fn activate(&mut self) {
+        self.active = true;
+        self.input.clear();
+    }
+    pub fn dismiss(&mut self) {
+        self.active = false;
+        self.input.clear();
+    }
+}
+
 /// In-file search state: query, all match positions, and current highlighted match.
 pub struct SearchBar {
     pub active: bool,
     pub query: String,
     pub matches: Vec<(usize, usize)>, // (line, char_col) in document coords
     pub current: usize,
+    pub replace_mode: bool,
+    pub replace_query: String,
+    pub replace_field_focused: bool,
 }
 
 impl SearchBar {
     pub fn new() -> Self {
-        Self { active: false, query: String::new(), matches: Vec::new(), current: 0 }
+        Self {
+            active: false,
+            query: String::new(),
+            matches: Vec::new(),
+            current: 0,
+            replace_mode: false,
+            replace_query: String::new(),
+            replace_field_focused: false,
+        }
     }
 
     pub fn activate(&mut self) {
         self.active = true;
+        self.replace_mode = false;
+        self.replace_field_focused = false;
         self.query.clear();
+        self.matches.clear();
+        self.current = 0;
+    }
+
+    pub fn activate_replace(&mut self) {
+        self.active = true;
+        self.replace_mode = true;
+        self.replace_field_focused = false;
+        self.query.clear();
+        self.replace_query.clear();
         self.matches.clear();
         self.current = 0;
     }
 
     pub fn dismiss(&mut self) {
         self.active = false;
+        self.replace_mode = false;
+        self.replace_field_focused = false;
     }
 
     pub fn current_match(&self) -> Option<(usize, usize)> {
@@ -51,6 +96,8 @@ pub struct Buffer {
     pub history: UndoHistory,
     pub clipboard: Clipboard,
     pub search: SearchBar,
+    pub goto_line: GotoLineBar,
+    pub multi_select_query: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
     viewport_height: usize,
@@ -66,6 +113,8 @@ impl Buffer {
             history: UndoHistory::new(),
             clipboard: Clipboard::new(),
             search: SearchBar::new(),
+            goto_line: GotoLineBar::new(),
+            multi_select_query: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
             viewport_height: 24,
@@ -80,6 +129,8 @@ impl Buffer {
             history: UndoHistory::new(),
             clipboard: Clipboard::new(),
             search: SearchBar::new(),
+            goto_line: GotoLineBar::new(),
+            multi_select_query: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
             viewport_height: 24,
@@ -180,6 +231,121 @@ impl Buffer {
             self.cursor.selection = None;
             self.ensure_cursor_visible();
         }
+    }
+
+    /// Replace the current search match with the replace query string.
+    fn replace_current(&mut self) {
+        if let Some((line, col)) = self.search.current_match() {
+            let query_len = self.search.query.chars().count();
+            let replace = self.search.replace_query.clone();
+            // Delete the matched region then insert the replacement
+            let start = Position::new(line, col);
+            let end = Position::new(line, col + query_len);
+            self.document.delete_range(start, end);
+            self.document.insert_text(start, &replace);
+            self.recompute_search();
+            self.jump_to_current_match();
+        }
+    }
+
+    /// Replace all search matches with the replace query string.
+    fn replace_all(&mut self) {
+        let query_len = self.search.query.chars().count();
+        let replace = self.search.replace_query.clone();
+        let replace_len = replace.chars().count();
+        // Snapshot matches then apply replacements, adjusting col offset per line
+        let matches = self.search.matches.clone();
+        // Track per-line column offset caused by replacements
+        let offset_delta = replace_len as i64 - query_len as i64;
+        let mut line_offsets: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+        for (line, col) in matches {
+            let adj = *line_offsets.get(&line).unwrap_or(&0);
+            let real_col = ((col as i64) + adj).max(0) as usize;
+            let start = Position::new(line, real_col);
+            let end = Position::new(line, real_col + query_len);
+            self.document.delete_range(start, end);
+            self.document.insert_text(start, &replace);
+            *line_offsets.entry(line).or_insert(0) += offset_delta;
+        }
+        self.recompute_search();
+        self.jump_to_current_match();
+    }
+
+    /// Select the next occurrence of the word under cursor (or current selection text).
+    /// Repeated calls cycle through all occurrences, wrapping at end of file.
+    pub fn select_next_occurrence(&mut self) {
+        // Determine the query: use selection text if any, otherwise word under cursor
+        let query = if let Some(sel) = &self.cursor.selection {
+            let (start, end) = sel.ordered();
+            if start.line == end.line {
+                let raw = self.document.line(start.line);
+                let chars: Vec<char> = raw.chars().collect();
+                chars[start.col..end.col.min(chars.len())].iter().collect::<String>()
+            } else {
+                String::new()
+            }
+        } else {
+            // Extract alphanumeric + underscore word at cursor
+            let pos = self.cursor.position;
+            let raw = self.document.line(pos.line);
+            let chars: Vec<char> = raw.chars().collect();
+            let col = pos.col.min(chars.len().saturating_sub(1));
+            if chars.is_empty() || !chars[col].is_alphanumeric() && chars[col] != '_' {
+                return;
+            }
+            let start = (0..=col).rev().take_while(|&i| {
+                chars[i].is_alphanumeric() || chars[i] == '_'
+            }).last().unwrap_or(col);
+            let end = (col..chars.len()).take_while(|&i| {
+                chars[i].is_alphanumeric() || chars[i] == '_'
+            }).last().map(|i| i + 1).unwrap_or(col + 1);
+            chars[start..end].iter().collect::<String>()
+        };
+
+        if query.is_empty() {
+            return;
+        }
+
+        let query_len = query.chars().count();
+        let query_lower = query.to_lowercase();
+        self.multi_select_query = Some(query.clone());
+
+        // Collect all matches across all lines
+        let mut all_matches: Vec<(usize, usize)> = Vec::new();
+        let line_count = self.document.line_count();
+        for line_idx in 0..line_count {
+            let raw = self.document.line(line_idx);
+            let line = raw.trim_end_matches('\n').trim_end_matches('\r');
+            let lower = line.to_lowercase();
+            let mut search_start = 0usize;
+            while let Some(byte_pos) = lower[search_start..].find(&query_lower) {
+                let abs_byte = search_start + byte_pos;
+                let char_col = lower[..abs_byte].chars().count();
+                all_matches.push((line_idx, char_col));
+                search_start = abs_byte + query_lower.len().max(1);
+            }
+        }
+
+        if all_matches.is_empty() {
+            return;
+        }
+
+        // Find first match after (cursor_line, cursor_col + query_len)
+        let cur_line = self.cursor.position.line;
+        let cur_col = self.cursor.position.col + query_len;
+        let next = all_matches.iter().position(|&(l, c)| {
+            l > cur_line || (l == cur_line && c >= cur_col)
+        }).unwrap_or(0); // wrap to first
+
+        let (line, col) = all_matches[next];
+        self.cursor.position.line = line;
+        self.cursor.position.col = col;
+        self.cursor.desired_col = col;
+        self.cursor.selection = Some(Selection::new(
+            Position::new(line, col),
+            Position::new(line, col + query_len),
+        ));
+        self.ensure_cursor_visible();
     }
 
     /// Apply a background colour overlay to character range [start, end) within a span list.
@@ -502,6 +668,7 @@ impl Buffer {
     // -- Text editing --
 
     pub fn insert_char(&mut self, ch: char) {
+        self.multi_select_query = None;
         // If there's a selection, delete it first (replace selection)
         self.delete_selection();
         let pos = self.cursor.position;
@@ -544,6 +711,7 @@ impl Buffer {
     }
 
     pub fn delete_backward(&mut self) {
+        self.multi_select_query = None;
         // If there's a selection, just delete it
         if self.cursor.selection.is_some() {
             self.delete_selection();
@@ -652,6 +820,7 @@ impl Buffer {
     }
 
     pub fn delete_forward(&mut self) {
+        self.multi_select_query = None;
         let pos = self.cursor.position;
         let line_len = self.document.line_len(pos.line);
         if pos.col < line_len {
@@ -929,26 +1098,95 @@ impl Buffer {
 
 impl Component for Buffer {
     fn handle_action(&mut self, action: &Action) -> AppCommand {
-        // When search bar is active, intercept typing and navigation
-        if self.search.active {
+        // Goto-line bar intercepts all input when active
+        if self.goto_line.active {
             match action {
-                Action::FindInFile | Action::FindAndReplace => {
-                    self.search.dismiss();
+                Action::GoToLine => {
+                    self.goto_line.dismiss();
                     return AppCommand::Nothing;
                 }
-                Action::InsertChar(ch) => {
-                    self.search.query.push(*ch);
-                    self.recompute_search();
-                    self.jump_to_current_match();
+                Action::InsertChar(ch) if ch.is_ascii_digit() => {
+                    self.goto_line.input.push(*ch);
                     return AppCommand::Nothing;
                 }
                 Action::DeleteBackward => {
-                    self.search.query.pop();
-                    self.recompute_search();
-                    self.jump_to_current_match();
+                    self.goto_line.input.pop();
                     return AppCommand::Nothing;
                 }
-                Action::CursorDown | Action::InsertNewline => {
+                Action::InsertNewline => {
+                    if let Ok(n) = self.goto_line.input.parse::<usize>() {
+                        let max = self.document.line_count().saturating_sub(1);
+                        let target = n.saturating_sub(1).min(max);
+                        self.cursor.position.line = target;
+                        self.cursor.position.col = 0;
+                        self.cursor.desired_col = 0;
+                        self.cursor.selection = None;
+                        self.ensure_cursor_visible();
+                    }
+                    self.goto_line.dismiss();
+                    return AppCommand::Nothing;
+                }
+                _ => {
+                    self.goto_line.dismiss();
+                    return AppCommand::Nothing;
+                }
+            }
+        }
+
+        // When search bar is active, intercept typing and navigation
+        if self.search.active {
+            match action {
+                Action::FindInFile => {
+                    self.search.dismiss();
+                    return AppCommand::Nothing;
+                }
+                Action::FindAndReplace => {
+                    if self.search.replace_mode {
+                        self.search.dismiss();
+                    } else {
+                        self.search.activate_replace();
+                    }
+                    return AppCommand::Nothing;
+                }
+                Action::InsertTab if self.search.replace_mode => {
+                    self.search.replace_field_focused = !self.search.replace_field_focused;
+                    return AppCommand::Nothing;
+                }
+                Action::InsertChar(ch) => {
+                    if self.search.replace_mode && self.search.replace_field_focused {
+                        self.search.replace_query.push(*ch);
+                    } else {
+                        self.search.query.push(*ch);
+                        self.recompute_search();
+                        self.jump_to_current_match();
+                    }
+                    return AppCommand::Nothing;
+                }
+                Action::DeleteBackward => {
+                    if self.search.replace_mode && self.search.replace_field_focused {
+                        self.search.replace_query.pop();
+                    } else {
+                        self.search.query.pop();
+                        self.recompute_search();
+                        self.jump_to_current_match();
+                    }
+                    return AppCommand::Nothing;
+                }
+                Action::InsertNewline => {
+                    if self.search.replace_mode && self.search.replace_field_focused {
+                        self.replace_current();
+                    } else if !self.search.matches.is_empty() {
+                        self.search.current =
+                            (self.search.current + 1) % self.search.matches.len();
+                        self.jump_to_current_match();
+                    }
+                    return AppCommand::Nothing;
+                }
+                Action::SelectAll if self.search.replace_mode && self.search.replace_field_focused => {
+                    self.replace_all();
+                    return AppCommand::Nothing;
+                }
+                Action::CursorDown => {
                     if !self.search.matches.is_empty() {
                         self.search.current =
                             (self.search.current + 1) % self.search.matches.len();
@@ -973,6 +1211,9 @@ impl Component for Buffer {
 
         match action {
             Action::FindInFile => self.search.activate(),
+            Action::FindAndReplace => self.search.activate_replace(),
+            Action::GoToLine => self.goto_line.activate(),
+            Action::SelectNextOccurrence => self.select_next_occurrence(),
             Action::CursorUp => self.move_cursor_up(),
             Action::CursorDown => self.move_cursor_down(),
             Action::CursorLeft => self.move_cursor_left(),

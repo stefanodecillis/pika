@@ -77,10 +77,14 @@ impl Sidebar {
         self.input_buffer.pop();
     }
 
-    fn cancel_input(&mut self) {
+    pub fn cancel_input(&mut self) {
         self.rename_input = None;
         self.new_file_input = None;
         self.input_buffer.clear();
+    }
+
+    pub fn is_in_input_mode(&self) -> bool {
+        self.rename_input.is_some() || self.new_file_input.is_some()
     }
 
     pub fn render_tree(&self, frame: &mut Frame, area: Rect, focused: bool, theme: &Theme) {

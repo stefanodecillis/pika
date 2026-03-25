@@ -21,6 +21,7 @@ use crate::ui::editor::TabContent;
 use crate::ui::completion::CompletionPopup;
 use crate::ui::editor::EditorPane;
 use crate::ui::confirm_dialog::{ConfirmAction, ConfirmDialog, ConfirmResult};
+use crate::ui::project_search::ProjectSearch;
 use crate::ui::shortcuts_help::ShortcutsHelp;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::{AppCommand, Component};
@@ -33,6 +34,7 @@ pub struct App {
     pub editor: EditorPane,
     pub command_palette: CommandPalette,
     pub completion: CompletionPopup,
+    pub project_search: ProjectSearch,
     pub shortcuts_help: ShortcutsHelp,
     pub confirm_dialog: ConfirmDialog,
     pub input_handler: InputHandler,
@@ -50,6 +52,7 @@ impl App {
         let editor = EditorPane::new(settings.theme.clone());
         let command_palette = CommandPalette::new();
         let completion = CompletionPopup::new();
+        let project_search = ProjectSearch::new();
         let shortcuts_help = ShortcutsHelp::new();
         let confirm_dialog = ConfirmDialog::new();
         let input_handler = InputHandler::new(KeymapSet::default());
@@ -64,6 +67,7 @@ impl App {
             editor,
             command_palette,
             completion,
+            project_search,
             shortcuts_help,
             confirm_dialog,
             input_handler,
@@ -197,7 +201,15 @@ impl App {
             return;
         }
 
-        // When editor search bar is active, Esc dismisses search instead of switching focus
+        // When sidebar is in input mode (rename/new-file), Esc cancels it instead of switching focus
+        if action == Action::FocusNext && self.focus == FocusArea::Sidebar {
+            if self.sidebar.is_in_input_mode() {
+                self.sidebar.cancel_input();
+                return;
+            }
+        }
+
+        // When editor search/goto bar is active, Esc dismisses it instead of switching focus
         if matches!(&action, Action::FocusNext | Action::CompletionDismiss)
             && self.focus == FocusArea::Editor
         {
@@ -206,6 +218,56 @@ impl App {
                     buf.search.dismiss();
                     return;
                 }
+                if buf.goto_line.active {
+                    buf.goto_line.dismiss();
+                    return;
+                }
+            }
+        }
+
+        // Project-wide search overlay captures input when visible
+        if self.project_search.visible {
+            match &action {
+                Action::InsertChar(ch) => {
+                    let root = self.root_dir.clone();
+                    self.project_search.push_char(*ch, &root);
+                    return;
+                }
+                Action::DeleteBackward => {
+                    let root = self.root_dir.clone();
+                    self.project_search.pop_char(&root);
+                    return;
+                }
+                Action::CursorDown | Action::TreeDown => {
+                    self.project_search.select_next();
+                    return;
+                }
+                Action::CursorUp | Action::TreeUp => {
+                    self.project_search.select_previous();
+                    return;
+                }
+                Action::InsertNewline | Action::TreeOpen => {
+                    if let Some((path, line)) = self.project_search.accept() {
+                        self.project_search.hide();
+                        let cmd = AppCommand::OpenFile(path);
+                        self.execute_command(cmd);
+                        // Jump to matched line in the newly opened buffer
+                        if let Some(buf) = self.editor.active_buffer_mut() {
+                            let max = buf.document.line_count().saturating_sub(1);
+                            buf.cursor.position.line = line.min(max);
+                            buf.cursor.position.col = 0;
+                            buf.cursor.desired_col = 0;
+                            buf.cursor.selection = None;
+                            buf.ensure_cursor_visible();
+                        }
+                    }
+                    return;
+                }
+                Action::FocusNext | Action::CompletionDismiss | Action::PaletteDismiss => {
+                    self.project_search.hide();
+                    return;
+                }
+                _ => return, // absorb all other keys while open
             }
         }
 
@@ -359,8 +421,12 @@ impl App {
             AppCommand::ShowShortcuts => {
                 self.shortcuts_help.toggle();
             }
-            AppCommand::ShowFileFinder | AppCommand::ProjectSearch => {
-                // Will be implemented with more advanced search
+            AppCommand::ShowFileFinder => {
+                // File finder — falls through to command palette for now
+            }
+            AppCommand::ProjectSearch => {
+                let root = self.root_dir.clone();
+                self.project_search.show(&root);
             }
             AppCommand::Nothing => {}
         }
@@ -523,6 +589,11 @@ impl App {
         // Confirm dialog (renders on top of everything)
         if self.confirm_dialog.visible {
             self.confirm_dialog.render(frame, size);
+        }
+
+        // Project search overlay (renders on top of everything)
+        if self.project_search.visible {
+            self.project_search.render(frame, size, &self.settings.theme);
         }
     }
 }
