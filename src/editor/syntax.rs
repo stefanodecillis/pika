@@ -51,6 +51,45 @@ impl SyntaxHighlighter {
         }
     }
 
+    /// Resolve the best syntect `SyntaxReference` for a given file extension,
+    /// with language-specific fallbacks for extensions that may not be present
+    /// in the default bundle (e.g. TypeScript → JavaScript).
+    fn resolve_syntax(&self, ext: &str) -> &syntect::parsing::SyntaxReference {
+        // First try direct lookup by extension.
+        if let Some(s) = self.syntax_set.find_syntax_by_extension(ext) {
+            return s;
+        }
+        // Try known language names for extensions that syntect may index by
+        // full name rather than by file extension.
+        let language_name: Option<&str> = match ext {
+            "ts" => Some("TypeScript"),
+            "tsx" => Some("TypeScript React"),
+            "jsx" => Some("JSX"),
+            "mjs" | "cjs" => Some("JavaScript"),
+            "toml" => Some("TOML"),
+            "yaml" | "yml" => Some("YAML"),
+            _ => None,
+        };
+        if let Some(name) = language_name {
+            if let Some(s) = self.syntax_set.find_syntax_by_name(name) {
+                return s;
+            }
+        }
+        // Language-specific fallbacks (e.g. TypeScript → JavaScript for basic
+        // keyword/string colouring when the TS grammar is not bundled).
+        let fallback_ext: Option<&str> = match ext {
+            "ts" | "tsx" | "jsx" | "mjs" | "cjs" => Some("js"),
+            "toml" => Some("ini"),
+            _ => None,
+        };
+        if let Some(fb) = fallback_ext {
+            if let Some(s) = self.syntax_set.find_syntax_by_extension(fb) {
+                return s;
+            }
+        }
+        self.syntax_set.find_syntax_plain_text()
+    }
+
     /// Highlight a single line of text using the given syntax name.
     ///
     /// `syntax_name` should be a file extension (e.g. `"rs"`, `"py"`) or a
@@ -60,11 +99,7 @@ impl SyntaxHighlighter {
     /// entire line is returned as a single span with a default foreground
     /// color.
     pub fn highlight_line(&self, line: &str, syntax_name: &str) -> Vec<HighlightedSpan> {
-        let syntax = self
-            .syntax_set
-            .find_syntax_by_extension(syntax_name)
-            .or_else(|| self.syntax_set.find_syntax_by_name(syntax_name))
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+        let syntax = self.resolve_syntax(syntax_name);
 
         let theme = self
             .theme_set

@@ -1,6 +1,6 @@
 [package]
 name = "pika-ide"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A fast, keyboard-driven terminal IDE with syntax highlighting and LSP support"
 license = "MIT"

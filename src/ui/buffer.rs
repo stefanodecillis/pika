@@ -142,6 +142,21 @@ impl Buffer {
         self.document.file_path.as_deref()
     }
 
+    /// Return the word (alphanumeric + `_`) immediately before the cursor on
+    /// the current line.  Used to determine the prefix that should be deleted
+    /// when a completion item is accepted.
+    pub fn word_before_cursor(&self) -> String {
+        let pos = self.cursor.position;
+        let raw = self.document.line(pos.line);
+        let chars: Vec<char> = raw.chars().collect();
+        let col = pos.col.min(chars.len());
+        let mut start = col;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        chars[start..col].iter().collect()
+    }
+
     pub fn name(&self) -> String {
         self.document
             .file_path

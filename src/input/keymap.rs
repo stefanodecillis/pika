@@ -170,6 +170,7 @@ impl Default for KeymapSet {
         completion.bind(KeyModifiers::NONE, KeyCode::Down, Action::CompletionDown);
         completion.bind(KeyModifiers::NONE, KeyCode::Enter, Action::CompletionAccept);
         completion.bind(KeyModifiers::NONE, KeyCode::Tab, Action::CompletionAccept);
+        completion.bind(KeyModifiers::NONE, KeyCode::Right, Action::CompletionAccept);
         completion.bind(KeyModifiers::NONE, KeyCode::Esc, Action::CompletionDismiss);
 
         // ======================================================

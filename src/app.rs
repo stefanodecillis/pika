@@ -310,13 +310,20 @@ impl App {
             // Completion popup actions
             action if self.completion.visible => {
                 let cmd = self.completion.handle_action(action);
-                // If accepting a completion, insert the text
+                // If accepting a completion, replace the typed prefix with the
+            // full completion text (stripping LSP snippet markers like $0, $1).
                 if matches!(action, Action::CompletionAccept) {
                     if let Some(item) = self.completion.accept() {
-                        let text = item.insert_text.clone();
+                        let insert_text = Self::strip_snippets(&item.insert_text);
+                        let prefix_len = self.completion.trigger_prefix.chars().count();
                         self.completion.hide();
                         if let Some(buf) = self.editor.active_buffer_mut() {
-                            for ch in text.chars() {
+                            // Delete the already-typed prefix
+                            for _ in 0..prefix_len {
+                                buf.delete_backward();
+                            }
+                            // Insert the full completion
+                            for ch in insert_text.chars() {
                                 buf.insert_char(ch);
                             }
                         }
@@ -334,6 +341,13 @@ impl App {
         };
 
         self.execute_command(command);
+
+        // After the editor processes a keystroke, notify LSP about changes and
+        // auto-trigger completion for certain trigger characters.
+        if self.focus == FocusArea::Editor && !self.completion.visible {
+            self.notify_lsp_after_edit(&action);
+            self.auto_trigger_completion(&action);
+        }
     }
 
     fn execute_command(&mut self, command: AppCommand) {
@@ -473,6 +487,75 @@ impl App {
     }
 
     // ── LSP helpers ────────────────────────────────────────────────────────────
+
+    /// Strip LSP/VS Code snippet placeholder markers (`$0`, `$1`, `${1:text}`)
+    /// from a completion insert text so they are not inserted literally.
+    fn strip_snippets(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '$' {
+                if chars.peek() == Some(&'{') {
+                    chars.next(); // consume '{'
+                    // Skip until matching '}'
+                    for c in chars.by_ref() {
+                        if c == '}' { break; }
+                    }
+                } else {
+                    // Skip one or more digits
+                    while chars.peek().map(|c: &char| c.is_ascii_digit()).unwrap_or(false) {
+                        chars.next();
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Send `textDocument/didChange` after a buffer-modifying editor action.
+    /// Called whenever the user types, deletes, pastes, etc.
+    fn notify_lsp_after_edit(&mut self, action: &Action) {
+        if !matches!(
+            action,
+            Action::InsertChar(_)
+                | Action::DeleteBackward
+                | Action::DeleteForward
+                | Action::InsertNewline
+                | Action::InsertTab
+                | Action::PasteText(_)
+        ) {
+            return;
+        }
+        let path_and_text = self.editor.active_buffer().and_then(|buf| {
+            buf.file_path().map(|p| (p.to_path_buf(), buf.document.text()))
+        });
+        if let Some((path, text)) = path_and_text {
+            self.send_lsp_did_change(&path, text);
+        }
+    }
+
+    /// Auto-trigger LSP completion after certain characters (`.`, `(`).
+    fn auto_trigger_completion(&mut self, action: &Action) {
+        let trigger_char = match action {
+            Action::InsertChar('.') | Action::InsertChar('(') => true,
+            _ => false,
+        };
+        if !trigger_char {
+            return;
+        }
+        let info = self.editor.active_buffer().and_then(|buf| {
+            buf.file_path().map(|p| (
+                p.to_path_buf(),
+                buf.cursor.position.line as u32,
+                buf.cursor.position.col as u32,
+            ))
+        });
+        if let Some((path, line, col)) = info {
+            self.send_lsp_completion(&path, line, col);
+        }
+    }
 
     fn file_uri(path: &std::path::Path) -> String {
         format!("file://{}", path.to_string_lossy())
@@ -718,7 +801,8 @@ impl App {
                 LspEvent::Completions(items) => {
                     if let Some(buf) = self.editor.active_buffer() {
                         let (cx, cy) = buf.cursor_screen_position();
-                        self.completion.show_from_lsp(items, cx, cy);
+                        let prefix = buf.word_before_cursor();
+                        self.completion.show_from_lsp(items, cx, cy, prefix);
                     }
                 }
                 LspEvent::Diagnostics { uri, diagnostics } => {

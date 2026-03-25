@@ -67,6 +67,10 @@ pub struct CompletionPopup {
     pub selected: usize,
     pub cursor_x: u16,
     pub cursor_y: u16,
+    /// The word prefix that was already typed when the popup was shown.
+    /// Accepted on completion acceptance so the caller can delete it before
+    /// inserting the full completion text.
+    pub trigger_prefix: String,
 }
 
 impl CompletionPopup {
@@ -77,6 +81,7 @@ impl CompletionPopup {
             selected: 0,
             cursor_x: 0,
             cursor_y: 0,
+            trigger_prefix: String::new(),
         }
     }
 
@@ -92,18 +97,23 @@ impl CompletionPopup {
         self.visible = true;
     }
 
-    pub fn show_from_lsp(&mut self, items: Vec<lsp_types::CompletionItem>, cursor_x: u16, cursor_y: u16) {
+    pub fn show_from_lsp(
+        &mut self,
+        items: Vec<lsp_types::CompletionItem>,
+        cursor_x: u16,
+        cursor_y: u16,
+        trigger_prefix: String,
+    ) {
         let completion_items: Vec<CompletionItem> = items
             .into_iter()
             .map(|item| CompletionItem {
                 label: item.label.clone(),
                 detail: item.detail.clone(),
                 kind: CompletionKind::from_lsp(item.kind),
-                insert_text: item
-                    .insert_text
-                    .unwrap_or(item.label),
+                insert_text: item.insert_text.unwrap_or(item.label),
             })
             .collect();
+        self.trigger_prefix = trigger_prefix;
         self.show(completion_items, cursor_x, cursor_y);
     }
 
@@ -349,7 +359,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        popup.show_from_lsp(lsp_items, 10, 5);
+        popup.show_from_lsp(lsp_items, 10, 5, String::new());
         assert!(popup.visible);
         assert_eq!(popup.items[0].label, "test_fn");
         assert_eq!(popup.items[0].insert_text, "test_fn()");
