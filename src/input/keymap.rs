@@ -67,6 +67,7 @@ impl Default for KeymapSet {
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('w'), Action::CloseTab);
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('q'), Action::Quit);
         global.bind(KeyModifiers::CONTROL, KeyCode::Tab, Action::NextTab);
+        global.bind(KeyModifiers::CONTROL, KeyCode::BackTab, Action::PreviousTab);
         global.bind(KeyModifiers::NONE, KeyCode::Esc, Action::FocusNext);
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('h'), Action::ShowShortcuts);
         global.bind(
@@ -135,7 +136,7 @@ impl Default for KeymapSet {
 
         // -- Search --
         editor.bind(KeyModifiers::CONTROL, KeyCode::Char('f'), Action::FindInFile);
-        editor.bind(KeyModifiers::CONTROL, KeyCode::Char('h'), Action::FindAndReplace);
+        editor.bind(KeyModifiers::CONTROL, KeyCode::Char('r'), Action::FindAndReplace);
         editor.bind(KeyModifiers::CONTROL, KeyCode::Char('g'), Action::GoToLine);
 
         // -- LSP --
@@ -349,8 +350,19 @@ mod tests {
             Some(&Action::FindInFile)
         );
         assert_eq!(
-            set.editor.get(KeyModifiers::CONTROL, KeyCode::Char('h')),
+            set.editor.get(KeyModifiers::CONTROL, KeyCode::Char('r')),
             Some(&Action::FindAndReplace)
+        );
+        // Ctrl+H must NOT be in editor map so the global ShowShortcuts binding is reached
+        assert_eq!(set.editor.get(KeyModifiers::CONTROL, KeyCode::Char('h')), None);
+    }
+
+    #[test]
+    fn test_global_previous_tab() {
+        let set = default_set();
+        assert_eq!(
+            set.global.get(KeyModifiers::CONTROL, KeyCode::BackTab),
+            Some(&Action::PreviousTab)
         );
     }
 

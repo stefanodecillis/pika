@@ -152,7 +152,7 @@ impl ShortcutsHelp {
         lines.push(shortcut("Ctrl+W", "Close current tab"));
         lines.push(shortcut("Ctrl+Q", "Quit"));
         lines.push(shortcut("Ctrl+Tab", "Next tab"));
-        lines.push(shortcut("Ctrl+H", "Show/hide this help"));
+        lines.push(shortcut("Ctrl+Shift+Tab", "Previous tab"));
         lines.push(shortcut("Ctrl+Shift+F", "Project-wide search"));
         lines.push(shortcut("Esc", "Switch focus (sidebar ↔ editor)"));
         lines.push(Line::from(""));
@@ -190,6 +190,7 @@ impl ShortcutsHelp {
         lines.push(separator());
         lines.push(shortcut("Ctrl+F", "Find in file"));
         lines.push(shortcut("Ctrl+R", "Find and replace"));
+        lines.push(shortcut("Ctrl+H", "Show/hide shortcuts help"));
         lines.push(Line::from(""));
 
         // Editor - LSP
@@ -217,6 +218,20 @@ impl ShortcutsHelp {
         lines.push(shortcut("F2", "Rename file"));
         lines.push(shortcut("N", "New file"));
         lines.push(shortcut("Shift+N", "New directory"));
+        lines.push(Line::from(""));
+
+        // CSV Viewer
+        lines.push(Line::from(Span::styled("  CSV Viewer", heading)));
+        lines.push(separator());
+        lines.push(shortcut("↑ / ↓", "Move between rows"));
+        lines.push(shortcut("← / →", "Move between columns"));
+        lines.push(shortcut("Tab", "Move to next column (wraps)"));
+        lines.push(shortcut("Enter", "Edit current cell"));
+        lines.push(shortcut("Any key", "Edit cell (appends to value)"));
+        lines.push(shortcut("Ctrl+Z (while editing)", "Cancel edit, restore value"));
+        lines.push(shortcut("Backspace / Delete", "Clear cell content"));
+        lines.push(shortcut("Page Up / Page Down", "Scroll rows by page"));
+        lines.push(shortcut("Ctrl+S", "Save CSV file"));
         lines.push(Line::from(""));
 
         // Drag & Drop
