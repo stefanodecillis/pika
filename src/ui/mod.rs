@@ -4,6 +4,7 @@ pub mod completion;
 pub mod confirm_dialog;
 pub mod csv_view;
 pub mod editor;
+pub mod project_search;
 pub mod shortcuts_help;
 pub mod sidebar;
 pub mod status_bar;

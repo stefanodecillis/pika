@@ -184,15 +184,26 @@ impl EditorPane {
         self.active_buffer().map(|b| b.search.active).unwrap_or(false)
     }
 
+    /// Returns true if the active text buffer has its replace bar open.
+    pub fn replace_active(&self) -> bool {
+        self.active_buffer().map(|b| b.search.active && b.search.replace_mode).unwrap_or(false)
+    }
+
+    /// Returns true if the active text buffer has its goto-line bar open.
+    pub fn goto_line_active(&self) -> bool {
+        self.active_buffer().map(|b| b.goto_line.active).unwrap_or(false)
+    }
+
     /// Update the active tab's viewport to match the current terminal size.
     /// Must be called before render.
     pub fn sync_viewport(&mut self, area: Rect) {
         if self.tabs.is_empty() {
             return;
         }
-        // Account for: outer border (2), tab bar (1), status bar (1) + search bar (1 when active)
-        let search_row: u16 = if self.search_active() { 1 } else { 0 };
-        let height = area.height.saturating_sub(4 + search_row) as usize;
+        // Account for: outer border (2), tab bar (1), status bar (1) + optional overlay bars
+        let extra_rows =
+            self.search_active() as u16 + self.replace_active() as u16 + self.goto_line_active() as u16;
+        let height = area.height.saturating_sub(4 + extra_rows) as usize;
         let width = area.width.saturating_sub(2) as usize;
         if let Some(tab) = self.tabs.get_mut(self.tab_bar.active) {
             tab.update_viewport(height, width);
@@ -319,12 +330,20 @@ impl Component for EditorPane {
                 frame.render_widget(block, area);
 
                 let search_active = self.search_active();
+                let replace_active = self.replace_active();
+                let goto_line_active = self.goto_line_active();
                 let mut constraints = vec![
                     Constraint::Length(1), // tab bar
                     Constraint::Min(1),    // editor content
                 ];
                 if search_active {
                     constraints.push(Constraint::Length(1)); // search bar
+                }
+                if replace_active {
+                    constraints.push(Constraint::Length(1)); // replace bar
+                }
+                if goto_line_active {
+                    constraints.push(Constraint::Length(1)); // goto-line bar
                 }
                 constraints.push(Constraint::Length(1)); // status bar
 
@@ -334,6 +353,12 @@ impl Component for EditorPane {
                     .split(inner);
 
                 self.tab_bar.render(frame, chunks[0], &self.theme);
+
+                // Compute bar chunk indices dynamically
+                let search_bar_idx = 2;
+                let replace_bar_idx = 2 + search_active as usize;
+                let goto_bar_idx = 2 + search_active as usize + replace_active as usize;
+                let status_idx = 2 + search_active as usize + replace_active as usize + goto_line_active as usize;
 
                 if let Some(TabContent::Text(buf)) = self.tabs.get(self.tab_bar.active) {
                     let editor_area = chunks[1];
@@ -350,7 +375,7 @@ impl Component for EditorPane {
                     );
                     frame.render_widget(paragraph, editor_area);
 
-                    if focused && !search_active {
+                    if focused && !search_active && !goto_line_active {
                         let (cx, cy) = buf.cursor_screen_position();
                         let cursor_x = editor_area.x + cx;
                         let cursor_y = editor_area.y + cy;
@@ -373,11 +398,39 @@ impl Component for EditorPane {
                                 .fg(Color::White)
                                 .bg(Color::Rgb(30, 30, 55)),
                         );
-                        frame.render_widget(search_bar, chunks[2]);
+                        frame.render_widget(search_bar, chunks[search_bar_idx]);
+                    }
+
+                    if replace_active {
+                        let cursor_indicator = if buf.search.replace_field_focused { "▶ " } else { "" };
+                        let replace_text = format!(
+                            " Replace: {}{cursor_indicator}{}  Tab·Enter·Ctrl+A",
+                            if buf.search.replace_field_focused { "" } else { "▶ " },
+                            buf.search.replace_query,
+                        );
+                        let replace_bar = Paragraph::new(replace_text).style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(55, 20, 55)),
+                        );
+                        frame.render_widget(replace_bar, chunks[replace_bar_idx]);
+                    }
+
+                    if goto_line_active {
+                        let line_count = buf.document.line_count();
+                        let goto_text = format!(
+                            " Go to line: {}  [1–{}]  Enter to jump • Esc to cancel",
+                            buf.goto_line.input, line_count
+                        );
+                        let goto_bar = Paragraph::new(goto_text).style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(20, 55, 20)),
+                        );
+                        frame.render_widget(goto_bar, chunks[goto_bar_idx]);
                     }
                 }
 
-                let status_idx = if search_active { 3 } else { 2 };
                 let info = self.status_info();
                 StatusBar::render(&info, frame, chunks[status_idx], &self.theme);
             }
