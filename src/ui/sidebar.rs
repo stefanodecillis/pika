@@ -185,8 +185,19 @@ impl Component for Sidebar {
                     self.handle_input_char(*ch);
                     return AppCommand::Nothing;
                 }
-                Action::DeleteBackward => {
+                // Backspace is bound to FileDelete in the sidebar keymap; treat as delete in input mode
+                Action::DeleteBackward | Action::FileDelete => {
                     self.handle_input_backspace();
+                    return AppCommand::Nothing;
+                }
+                // 'n' and 'N' are bound to FileNew/DirNew in the sidebar keymap;
+                // in input mode they should type the character instead
+                Action::FileNew => {
+                    self.handle_input_char('n');
+                    return AppCommand::Nothing;
+                }
+                Action::DirNew => {
+                    self.handle_input_char('N');
                     return AppCommand::Nothing;
                 }
                 Action::InsertNewline | Action::TreeOpen => {

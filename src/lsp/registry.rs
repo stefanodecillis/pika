@@ -192,6 +192,11 @@ impl LspRegistry {
     pub fn has_server_for(&self, ext: &str) -> bool {
         self.servers.contains_key(ext)
     }
+
+    /// Return the binary command name for the server handling this extension, if any.
+    pub fn command_for_extension(&self, ext: &str) -> Option<&str> {
+        self.servers.get(ext).map(|c| c.command.as_str())
+    }
 }
 
 /// Check whether a binary exists on `PATH` using `which`.

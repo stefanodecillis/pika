@@ -72,6 +72,11 @@ impl Document {
         Ok(())
     }
 
+    /// Return the full document text as a String.
+    pub fn text(&self) -> String {
+        self.rope.to_string()
+    }
+
     fn write_to_file(&self, path: &Path) -> Result<()> {
         let text = self.rope.to_string();
         std::fs::write(path, &text)
@@ -158,11 +163,6 @@ impl Document {
             return None;
         }
         Some(line.char(pos.col))
-    }
-
-    /// Returns the full document text as a `String`.
-    pub fn text(&self) -> String {
-        self.rope.to_string()
     }
 
     /// Returns a reference to the underlying `Rope`.

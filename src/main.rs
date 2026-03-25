@@ -11,6 +11,11 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
+    // Create and enter a tokio runtime so that async LSP tasks can be spawned
+    // from synchronous code throughout the application lifetime.
+    let rt = tokio::runtime::Runtime::new()?;
+    let _guard = rt.enter();
+
     // Determine the root directory: first arg or current directory
     let root_dir = env::args()
         .nth(1)

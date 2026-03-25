@@ -54,6 +54,10 @@ impl InputHandler {
         match focus {
             FocusArea::Editor => self.editor_fallback(modifiers, code),
             FocusArea::CommandPalette => self.palette_fallback(modifiers, code),
+            // Sidebar uses InsertChar fallback so filename typing works in input mode.
+            // Bound sidebar keys (n→FileNew, N→DirNew) are re-mapped inside sidebar.handle_action
+            // when input mode is active.
+            FocusArea::Sidebar => self.sidebar_fallback(modifiers, code),
             _ => Action::None,
         }
     }
@@ -61,6 +65,17 @@ impl InputHandler {
     /// Fallback rules for unbound keys when the editor is focused.
     fn editor_fallback(&self, modifiers: KeyModifiers, code: KeyCode) -> Action {
         // Plain character or shift+character (upper-case letters, symbols)
+        if let KeyCode::Char(c) = code {
+            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+                return Action::InsertChar(c);
+            }
+        }
+        Action::None
+    }
+
+    /// Fallback rules for unbound keys when the sidebar is focused.
+    /// Produces InsertChar so filename/rename input mode receives typed characters.
+    fn sidebar_fallback(&self, modifiers: KeyModifiers, code: KeyCode) -> Action {
         if let KeyCode::Char(c) = code {
             if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
                 return Action::InsertChar(c);
@@ -479,13 +494,13 @@ mod tests {
         );
     }
 
-    // -- Sidebar unbound char returns None --
+    // -- Sidebar unbound char produces InsertChar for input mode --
 
     #[test]
-    fn test_sidebar_unbound_char_returns_none() {
+    fn test_sidebar_unbound_char_produces_insert_char() {
         let h = handler();
-        // 'z' is not bound in the sidebar and there is no char-fallback for sidebar
+        // 'z' is not bound in the sidebar but should produce InsertChar for filename typing
         let ev = press(KeyCode::Char('z'), KeyModifiers::NONE);
-        assert_eq!(h.handle_event(&ev, FocusArea::Sidebar), Action::None);
+        assert_eq!(h.handle_event(&ev, FocusArea::Sidebar), Action::InsertChar('z'));
     }
 }

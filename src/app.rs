@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::config::Settings;
 use crate::events::{AppEvent, BackgroundCommand, FileChangeEvent, LspEvent};
 use crate::input::{Action, FocusArea, InputHandler, KeymapSet};
+use crate::lsp::registry::LspRegistry;
 use crate::ui::buffer::Buffer;
 use crate::ui::command_palette::CommandPalette;
 use crate::ui::editor::TabContent;
@@ -43,6 +44,14 @@ pub struct App {
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
     pub event_rx: mpsc::UnboundedReceiver<AppEvent>,
     pub bg_tx: mpsc::UnboundedSender<BackgroundCommand>,
+    // LSP integration
+    lsp_registry: LspRegistry,
+    lsp_event_tx: mpsc::UnboundedSender<LspEvent>,
+    lsp_event_rx: mpsc::UnboundedReceiver<LspEvent>,
+    /// Server commands (e.g. "typescript-language-server") that have been initialized.
+    lsp_initialized: std::collections::HashSet<String>,
+    /// URI → current document version; only populated for files we have sent didOpen for.
+    lsp_open_versions: std::collections::HashMap<String, i32>,
 }
 
 impl App {
@@ -59,6 +68,8 @@ impl App {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let (lsp_event_tx, lsp_event_rx) = mpsc::unbounded_channel::<LspEvent>();
+        let lsp_registry = LspRegistry::new(&settings.lsp.servers);
 
         Ok(Self {
             root_dir,
@@ -76,6 +87,11 @@ impl App {
             event_tx,
             event_rx,
             bg_tx,
+            lsp_registry,
+            lsp_event_tx,
+            lsp_event_rx,
+            lsp_initialized: std::collections::HashSet::new(),
+            lsp_open_versions: std::collections::HashMap::new(),
         })
     }
 
@@ -114,6 +130,11 @@ impl App {
             // Process any pending app events (from background tasks)
             while let Ok(app_event) = self.event_rx.try_recv() {
                 self.handle_app_event(app_event);
+            }
+
+            // Process any pending LSP events
+            while let Ok(lsp_event) = self.lsp_event_rx.try_recv() {
+                self.handle_app_event(AppEvent::Lsp(lsp_event));
             }
         }
 
@@ -342,12 +363,20 @@ impl App {
             AppCommand::OpenFile(path) => {
                 if let Err(e) = self.editor.open_file(&path) {
                     log::error!("Failed to open file: {}", e);
+                } else {
+                    self.send_lsp_did_open(&path);
                 }
                 self.focus = FocusArea::Editor;
             }
             AppCommand::SaveCurrentFile => {
                 if let Err(e) = self.editor.save_active_tab() {
                     log::error!("Failed to save file: {}", e);
+                }
+                let path_and_text = self.editor.active_buffer().and_then(|buf| {
+                    buf.file_path().map(|p| (p.to_path_buf(), buf.document.text()))
+                });
+                if let Some((path, text)) = path_and_text {
+                    self.send_lsp_did_change(&path, text);
                 }
             }
             AppCommand::CloseCurrentTab => {
@@ -408,8 +437,19 @@ impl App {
             AppCommand::FilePaste(_target) => {
                 // Paste is handled via FileCopy/FileCut
             }
-            AppCommand::RequestCompletion
-            | AppCommand::RequestHover
+            AppCommand::RequestCompletion => {
+                let info = self.editor.active_buffer().and_then(|buf| {
+                    buf.file_path().map(|p| (
+                        p.to_path_buf(),
+                        buf.cursor.position.line as u32,
+                        buf.cursor.position.col as u32,
+                    ))
+                });
+                if let Some((path, line, col)) = info {
+                    self.send_lsp_completion(&path, line, col);
+                }
+            }
+            AppCommand::RequestHover
             | AppCommand::RequestGotoDefinition
             | AppCommand::RequestFindReferences
             | AppCommand::RequestCodeAction
@@ -430,6 +470,170 @@ impl App {
             }
             AppCommand::Nothing => {}
         }
+    }
+
+    // ── LSP helpers ────────────────────────────────────────────────────────────
+
+    fn file_uri(path: &std::path::Path) -> String {
+        format!("file://{}", path.to_string_lossy())
+    }
+
+    fn ext_to_lang_id(ext: &str) -> &'static str {
+        match ext {
+            "rs" => "rust",
+            "ts" => "typescript",
+            "tsx" => "typescriptreact",
+            "js" => "javascript",
+            "jsx" => "javascriptreact",
+            "py" => "python",
+            "go" => "go",
+            "lua" => "lua",
+            "c" | "h" => "c",
+            "cpp" | "hpp" => "cpp",
+            "zig" => "zig",
+            "java" => "java",
+            _ => "plaintext",
+        }
+    }
+
+    /// Send `textDocument/didOpen` (plus `initialize` if this is the first file for the server).
+    /// Silently no-ops when no tokio runtime is available (e.g. in unit tests).
+    fn send_lsp_did_open(&mut self, path: &std::path::Path) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let root_uri = format!("file://{}", self.root_dir.to_string_lossy());
+        let uri = Self::file_uri(path);
+
+        if self.lsp_open_versions.contains_key(&uri) {
+            return; // already open in LSP
+        }
+
+        let text = match self.editor.active_buffer() {
+            Some(buf) => buf.document.text(),
+            None => return,
+        };
+
+        let server_cmd = match self.lsp_registry.command_for_extension(ext) {
+            Some(cmd) => cmd.to_string(),
+            None => return, // no server configured for this extension
+        };
+        let client = match self.lsp_registry.client_for_extension(ext, &root_uri, self.lsp_event_tx.clone()) {
+            Some(c) => c,
+            None => return,
+        };
+
+        let needs_init = self.lsp_initialized.insert(server_cmd);
+        self.lsp_open_versions.insert(uri.clone(), 1);
+
+        let lang_id = Self::ext_to_lang_id(ext).to_string();
+        tokio::spawn(async move {
+            let locked = client.lock().await;
+            if needs_init {
+                if let Err(e) = locked.initialize(&root_uri).await {
+                    log::error!("LSP initialize failed: {}", e);
+                    return;
+                }
+            }
+            let uri_parsed = match uri.parse::<lsp_types::Uri>() {
+                Ok(u) => u,
+                Err(e) => { log::error!("Invalid URI: {}", e); return; }
+            };
+            locked.send_notification::<lsp_types::notification::DidOpenTextDocument>(
+                lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: uri_parsed,
+                        language_id: lang_id,
+                        version: 1,
+                        text,
+                    },
+                }
+            ).await;
+        });
+    }
+
+    /// Send `textDocument/didChange` with full document text.
+    fn send_lsp_did_change(&mut self, path: &std::path::Path, text: String) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let uri = Self::file_uri(path);
+        let version = match self.lsp_open_versions.get_mut(&uri) {
+            Some(v) => { *v += 1; *v }
+            None => return, // file not yet open in LSP
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let root_uri = format!("file://{}", self.root_dir.to_string_lossy());
+        let client = match self.lsp_registry.client_for_extension(ext, &root_uri, self.lsp_event_tx.clone()) {
+            Some(c) => c,
+            None => return,
+        };
+        tokio::spawn(async move {
+            let locked = client.lock().await;
+            let uri_parsed = match uri.parse::<lsp_types::Uri>() {
+                Ok(u) => u,
+                Err(e) => { log::error!("Invalid URI: {}", e); return; }
+            };
+            locked.send_notification::<lsp_types::notification::DidChangeTextDocument>(
+                lsp_types::DidChangeTextDocumentParams {
+                    text_document: lsp_types::VersionedTextDocumentIdentifier {
+                        uri: uri_parsed,
+                        version,
+                    },
+                    content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text,
+                    }],
+                }
+            ).await;
+        });
+    }
+
+    /// Send a `textDocument/completion` request and pipe results into the completion popup.
+    fn send_lsp_completion(&mut self, path: &std::path::Path, line: u32, col: u32) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let uri = Self::file_uri(path);
+        if !self.lsp_open_versions.contains_key(&uri) {
+            return; // file not open in LSP yet
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let root_uri = format!("file://{}", self.root_dir.to_string_lossy());
+        let client = match self.lsp_registry.client_for_extension(ext, &root_uri, self.lsp_event_tx.clone()) {
+            Some(c) => c,
+            None => return,
+        };
+        let event_tx = self.lsp_event_tx.clone();
+        tokio::spawn(async move {
+            let locked = client.lock().await;
+            let uri_parsed = match uri.parse::<lsp_types::Uri>() {
+                Ok(u) => u,
+                Err(e) => { log::error!("Invalid URI: {}", e); return; }
+            };
+            let params = lsp_types::CompletionParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri_parsed },
+                    position: lsp_types::Position { line, character: col },
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: None,
+            };
+            match locked.send_request::<lsp_types::request::Completion>(params).await {
+                Ok(Some(response)) => {
+                    let items = match response {
+                        lsp_types::CompletionResponse::Array(items) => items,
+                        lsp_types::CompletionResponse::List(list) => list.items,
+                    };
+                    let _ = event_tx.send(LspEvent::Completions(items));
+                }
+                Ok(None) => {}
+                Err(e) => log::debug!("LSP completion failed: {}", e),
+            }
+        });
     }
 
     fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
