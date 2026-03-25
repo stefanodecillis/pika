@@ -179,14 +179,20 @@ impl EditorPane {
         }
     }
 
+    /// Returns true if the active text buffer has its search bar open.
+    pub fn search_active(&self) -> bool {
+        self.active_buffer().map(|b| b.search.active).unwrap_or(false)
+    }
+
     /// Update the active tab's viewport to match the current terminal size.
     /// Must be called before render.
     pub fn sync_viewport(&mut self, area: Rect) {
         if self.tabs.is_empty() {
             return;
         }
-        // Account for: outer border (2), tab bar (1), status bar (1)
-        let height = area.height.saturating_sub(4) as usize;
+        // Account for: outer border (2), tab bar (1), status bar (1) + search bar (1 when active)
+        let search_row: u16 = if self.search_active() { 1 } else { 0 };
+        let height = area.height.saturating_sub(4 + search_row) as usize;
         let width = area.width.saturating_sub(2) as usize;
         if let Some(tab) = self.tabs.get_mut(self.tab_bar.active) {
             tab.update_viewport(height, width);
@@ -312,14 +318,19 @@ impl Component for EditorPane {
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
 
-                // Layout: tab bar (1 line) + editor content + status bar (1 line)
+                let search_active = self.search_active();
+                let mut constraints = vec![
+                    Constraint::Length(1), // tab bar
+                    Constraint::Min(1),    // editor content
+                ];
+                if search_active {
+                    constraints.push(Constraint::Length(1)); // search bar
+                }
+                constraints.push(Constraint::Length(1)); // status bar
+
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1), // tab bar
-                        Constraint::Min(1),    // editor content
-                        Constraint::Length(1), // status bar
-                    ])
+                    .constraints(constraints)
                     .split(inner);
 
                 self.tab_bar.render(frame, chunks[0], &self.theme);
@@ -339,7 +350,7 @@ impl Component for EditorPane {
                     );
                     frame.render_widget(paragraph, editor_area);
 
-                    if focused {
+                    if focused && !search_active {
                         let (cx, cy) = buf.cursor_screen_position();
                         let cursor_x = editor_area.x + cx;
                         let cursor_y = editor_area.y + cy;
@@ -349,10 +360,26 @@ impl Component for EditorPane {
                             frame.set_cursor_position((cursor_x, cursor_y));
                         }
                     }
+
+                    if search_active {
+                        let match_count = buf.search.matches.len();
+                        let current = if match_count > 0 { buf.search.current + 1 } else { 0 };
+                        let search_text = format!(
+                            " Find: {}  [{}/{}]  ↑↓/Enter to navigate • Esc/Ctrl+F to close",
+                            buf.search.query, current, match_count
+                        );
+                        let search_bar = Paragraph::new(search_text).style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(30, 30, 55)),
+                        );
+                        frame.render_widget(search_bar, chunks[2]);
+                    }
                 }
 
+                let status_idx = if search_active { 3 } else { 2 };
                 let info = self.status_info();
-                StatusBar::render(&info, frame, chunks[2], &self.theme);
+                StatusBar::render(&info, frame, chunks[status_idx], &self.theme);
             }
         }
     }

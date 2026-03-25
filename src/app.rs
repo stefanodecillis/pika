@@ -197,6 +197,18 @@ impl App {
             return;
         }
 
+        // When editor search bar is active, Esc dismisses search instead of switching focus
+        if matches!(&action, Action::FocusNext | Action::CompletionDismiss)
+            && self.focus == FocusArea::Editor
+        {
+            if let Some(buf) = self.editor.active_buffer_mut() {
+                if buf.search.active {
+                    buf.search.dismiss();
+                    return;
+                }
+            }
+        }
+
         // Handle global actions first
         let command = match &action {
             Action::Quit => AppCommand::Quit,

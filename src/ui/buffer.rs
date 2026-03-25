@@ -15,12 +15,42 @@ use crate::editor::syntax::SyntaxHighlighter;
 use crate::input::Action;
 use crate::ui::{AppCommand, Component};
 
+/// In-file search state: query, all match positions, and current highlighted match.
+pub struct SearchBar {
+    pub active: bool,
+    pub query: String,
+    pub matches: Vec<(usize, usize)>, // (line, char_col) in document coords
+    pub current: usize,
+}
+
+impl SearchBar {
+    pub fn new() -> Self {
+        Self { active: false, query: String::new(), matches: Vec::new(), current: 0 }
+    }
+
+    pub fn activate(&mut self) {
+        self.active = true;
+        self.query.clear();
+        self.matches.clear();
+        self.current = 0;
+    }
+
+    pub fn dismiss(&mut self) {
+        self.active = false;
+    }
+
+    pub fn current_match(&self) -> Option<(usize, usize)> {
+        if self.matches.is_empty() { None } else { Some(self.matches[self.current]) }
+    }
+}
+
 /// A buffer represents a single open file with its editing state.
 pub struct Buffer {
     pub document: Document,
     pub cursor: CursorState,
     pub history: UndoHistory,
     pub clipboard: Clipboard,
+    pub search: SearchBar,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
     viewport_height: usize,
@@ -35,6 +65,7 @@ impl Buffer {
             cursor: CursorState::new(),
             history: UndoHistory::new(),
             clipboard: Clipboard::new(),
+            search: SearchBar::new(),
             scroll_offset: 0,
             horizontal_scroll: 0,
             viewport_height: 24,
@@ -48,6 +79,7 @@ impl Buffer {
             cursor: CursorState::new(),
             history: UndoHistory::new(),
             clipboard: Clipboard::new(),
+            search: SearchBar::new(),
             scroll_offset: 0,
             horizontal_scroll: 0,
             viewport_height: 24,
@@ -114,6 +146,77 @@ impl Buffer {
         let max_line = self.document.line_count();
         let digits = format!("{}", max_line).len();
         digits + 2 // padding
+    }
+
+    // -- Search helpers --
+
+    fn recompute_search(&mut self) {
+        self.search.matches.clear();
+        self.search.current = 0;
+        let query = self.search.query.to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+        let line_count = self.document.line_count();
+        for line_idx in 0..line_count {
+            let raw = self.document.line(line_idx);
+            let line = raw.trim_end_matches('\n').trim_end_matches('\r');
+            let lower = line.to_lowercase();
+            let mut search_start = 0usize;
+            while let Some(byte_pos) = lower[search_start..].find(&query) {
+                let abs_byte = search_start + byte_pos;
+                let char_col = lower[..abs_byte].chars().count();
+                self.search.matches.push((line_idx, char_col));
+                search_start = abs_byte + query.len().max(1);
+            }
+        }
+    }
+
+    fn jump_to_current_match(&mut self) {
+        if let Some((line, col)) = self.search.current_match() {
+            self.cursor.position.line = line;
+            self.cursor.position.col = col;
+            self.cursor.desired_col = col;
+            self.cursor.selection = None;
+            self.ensure_cursor_visible();
+        }
+    }
+
+    /// Apply a background colour overlay to character range [start, end) within a span list.
+    fn overlay_range(spans: Vec<Span<'static>>, start: usize, end: usize, bg: Color) -> Vec<Span<'static>> {
+        if start >= end {
+            return spans;
+        }
+        let hl = Style::default().bg(bg);
+        let mut result = Vec::new();
+        let mut col = 0usize;
+        for span in spans {
+            let text: String = span.content.into_owned();
+            let chars: Vec<char> = text.chars().collect();
+            let span_len = chars.len();
+            let span_end = col + span_len;
+
+            if span_end <= start || col >= end {
+                result.push(Span::styled(chars.into_iter().collect::<String>(), span.style));
+            } else {
+                let rel_start = start.saturating_sub(col).min(span_len);
+                let rel_end = end.saturating_sub(col).min(span_len);
+                if rel_start > 0 {
+                    result.push(Span::styled(chars[..rel_start].iter().collect::<String>(), span.style));
+                }
+                if rel_start < rel_end {
+                    result.push(Span::styled(
+                        chars[rel_start..rel_end].iter().collect::<String>(),
+                        span.style.patch(hl),
+                    ));
+                }
+                if rel_end < span_len {
+                    result.push(Span::styled(chars[rel_end..].iter().collect::<String>(), span.style));
+                }
+            }
+            col = span_end;
+        }
+        result
     }
 
     // -- Cursor movement --
@@ -791,6 +894,24 @@ impl Buffer {
                 }
             }
 
+            // Apply search match highlights on top of the existing spans
+            if !self.search.query.is_empty() {
+                let query_chars = self.search.query.chars().count();
+                for (match_idx, &(ml, mc)) in self.search.matches.iter().enumerate() {
+                    if ml == i {
+                        let vis_col = mc.saturating_sub(self.horizontal_scroll);
+                        let span_start = vis_col + gutter_w;
+                        let span_end = span_start + query_chars;
+                        let bg = if match_idx == self.search.current {
+                            Color::Rgb(200, 120, 0) // current match: bright orange
+                        } else {
+                            Color::Rgb(90, 55, 10) // other matches: dim amber
+                        };
+                        spans = Self::overlay_range(spans, span_start, span_end, bg);
+                    }
+                }
+            }
+
             lines.push(Line::from(spans));
         }
 
@@ -808,7 +929,50 @@ impl Buffer {
 
 impl Component for Buffer {
     fn handle_action(&mut self, action: &Action) -> AppCommand {
+        // When search bar is active, intercept typing and navigation
+        if self.search.active {
+            match action {
+                Action::FindInFile | Action::FindAndReplace => {
+                    self.search.dismiss();
+                    return AppCommand::Nothing;
+                }
+                Action::InsertChar(ch) => {
+                    self.search.query.push(*ch);
+                    self.recompute_search();
+                    self.jump_to_current_match();
+                    return AppCommand::Nothing;
+                }
+                Action::DeleteBackward => {
+                    self.search.query.pop();
+                    self.recompute_search();
+                    self.jump_to_current_match();
+                    return AppCommand::Nothing;
+                }
+                Action::CursorDown | Action::InsertNewline => {
+                    if !self.search.matches.is_empty() {
+                        self.search.current =
+                            (self.search.current + 1) % self.search.matches.len();
+                        self.jump_to_current_match();
+                    }
+                    return AppCommand::Nothing;
+                }
+                Action::CursorUp => {
+                    if !self.search.matches.is_empty() {
+                        self.search.current = if self.search.current == 0 {
+                            self.search.matches.len() - 1
+                        } else {
+                            self.search.current - 1
+                        };
+                        self.jump_to_current_match();
+                    }
+                    return AppCommand::Nothing;
+                }
+                _ => {} // other actions fall through to normal handling
+            }
+        }
+
         match action {
+            Action::FindInFile => self.search.activate(),
             Action::CursorUp => self.move_cursor_up(),
             Action::CursorDown => self.move_cursor_down(),
             Action::CursorLeft => self.move_cursor_left(),
@@ -1214,5 +1378,79 @@ mod tests {
         buf.paste_text();
         assert_eq!(buf.cursor.position.line, 1);
         assert!(buf.document.line(1).contains("inserted line"));
+    }
+
+    #[test]
+    fn test_search_activate_and_dismiss() {
+        let buf = test_buffer();
+        assert!(!buf.search.active);
+        let mut buf = buf;
+        buf.search.activate();
+        assert!(buf.search.active);
+        assert!(buf.search.query.is_empty());
+        buf.search.dismiss();
+        assert!(!buf.search.active);
+    }
+
+    #[test]
+    fn test_search_finds_matches() {
+        let mut buf = Buffer::from_text("hello world\nfoo bar\nhello again\n");
+        buf.search.activate();
+        buf.search.query = "hello".to_string();
+        buf.recompute_search();
+        assert_eq!(buf.search.matches.len(), 2);
+        assert_eq!(buf.search.matches[0], (0, 0));
+        assert_eq!(buf.search.matches[1], (2, 0));
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let mut buf = Buffer::from_text("Hello HELLO hello\n");
+        buf.search.activate();
+        buf.search.query = "hello".to_string();
+        buf.recompute_search();
+        assert_eq!(buf.search.matches.len(), 3);
+    }
+
+    #[test]
+    fn test_search_navigate_matches() {
+        let mut buf = Buffer::from_text("foo foo foo\n");
+        buf.search.activate();
+        buf.search.query = "foo".to_string();
+        buf.recompute_search();
+        assert_eq!(buf.search.matches.len(), 3);
+        assert_eq!(buf.search.current, 0);
+        // CursorDown advances
+        buf.handle_action(&Action::CursorDown);
+        assert_eq!(buf.search.current, 1);
+        buf.handle_action(&Action::CursorDown);
+        assert_eq!(buf.search.current, 2);
+        // Wraps around
+        buf.handle_action(&Action::CursorDown);
+        assert_eq!(buf.search.current, 0);
+        // CursorUp wraps backwards
+        buf.handle_action(&Action::CursorUp);
+        assert_eq!(buf.search.current, 2);
+    }
+
+    #[test]
+    fn test_search_ctrl_f_toggles() {
+        let mut buf = test_buffer();
+        buf.handle_action(&Action::FindInFile);
+        assert!(buf.search.active);
+        buf.handle_action(&Action::FindInFile);
+        assert!(!buf.search.active);
+    }
+
+    #[test]
+    fn test_search_typing_updates_query() {
+        let mut buf = Buffer::from_text("hello world\n");
+        buf.handle_action(&Action::FindInFile);
+        buf.handle_action(&Action::InsertChar('h'));
+        buf.handle_action(&Action::InsertChar('e'));
+        assert_eq!(buf.search.query, "he");
+        assert!(!buf.search.matches.is_empty());
+        buf.handle_action(&Action::DeleteBackward);
+        assert_eq!(buf.search.query, "h");
     }
 }
