@@ -151,8 +151,8 @@ impl ShortcutsHelp {
         lines.push(shortcut("Ctrl+S", "Save current file"));
         lines.push(shortcut("Ctrl+W", "Close current tab"));
         lines.push(shortcut("Ctrl+Q", "Quit"));
-        lines.push(shortcut("Ctrl+Tab", "Next tab"));
-        lines.push(shortcut("Ctrl+Shift+Tab", "Previous tab"));
+        lines.push(shortcut("Alt+→", "Next tab"));
+        lines.push(shortcut("Alt+←", "Previous tab"));
         lines.push(shortcut("Ctrl+Shift+F", "Project-wide search"));
         lines.push(shortcut("Esc", "Switch focus (sidebar ↔ editor)"));
         lines.push(Line::from(""));

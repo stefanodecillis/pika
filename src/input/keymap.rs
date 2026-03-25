@@ -66,8 +66,8 @@ impl Default for KeymapSet {
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('s'), Action::SaveFile);
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('w'), Action::CloseTab);
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('q'), Action::Quit);
-        global.bind(KeyModifiers::CONTROL, KeyCode::Tab, Action::NextTab);
-        global.bind(KeyModifiers::CONTROL, KeyCode::BackTab, Action::PreviousTab);
+        global.bind(KeyModifiers::ALT, KeyCode::Right, Action::NextTab);
+        global.bind(KeyModifiers::ALT, KeyCode::Left, Action::PreviousTab);
         global.bind(KeyModifiers::NONE, KeyCode::Esc, Action::FocusNext);
         global.bind(KeyModifiers::CONTROL, KeyCode::Char('h'), Action::ShowShortcuts);
         global.bind(
@@ -237,9 +237,9 @@ mod tests {
     }
 
     #[test]
-    fn test_global_ctrl_tab_next_tab() {
+    fn test_global_alt_right_next_tab() {
         let set = default_set();
-        let action = set.global.get(KeyModifiers::CONTROL, KeyCode::Tab);
+        let action = set.global.get(KeyModifiers::ALT, KeyCode::Right);
         assert_eq!(action, Some(&Action::NextTab));
     }
 
@@ -358,10 +358,10 @@ mod tests {
     }
 
     #[test]
-    fn test_global_previous_tab() {
+    fn test_global_alt_left_previous_tab() {
         let set = default_set();
         assert_eq!(
-            set.global.get(KeyModifiers::CONTROL, KeyCode::BackTab),
+            set.global.get(KeyModifiers::ALT, KeyCode::Left),
             Some(&Action::PreviousTab)
         );
     }
