@@ -71,6 +71,8 @@ pub struct EditorPane {
     pub tab_bar: TabBar,
     pub highlighter: SyntaxHighlighter,
     pub theme: Theme,
+    /// LSP server name for the currently active file, set by App before render.
+    pub lsp_status: Option<String>,
 }
 
 impl EditorPane {
@@ -80,6 +82,7 @@ impl EditorPane {
             tab_bar: TabBar::new(),
             highlighter: SyntaxHighlighter::new(),
             theme,
+            lsp_status: None,
         }
     }
 
@@ -154,7 +157,7 @@ impl EditorPane {
                 cursor_col: buf.cursor.position.col,
                 total_lines: buf.document.line_count(),
                 modified: buf.is_modified(),
-                lsp_status: None,
+                lsp_status: self.lsp_status.clone(),
             },
             Some(TabContent::Csv(csv)) => StatusInfo {
                 file_name: csv.name(),

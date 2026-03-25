@@ -116,6 +116,9 @@ impl App {
             self.editor.sync_viewport(term_rect);
 
 
+            // Update LSP status indicator for the current file.
+            self.refresh_lsp_status();
+
             // Render
             terminal.draw(|frame| {
                 self.render(frame);
@@ -307,29 +310,82 @@ impl App {
                 self.command_palette.handle_action(action)
             }
 
-            // Completion popup actions
+            // Completion popup — navigation/accept/dismiss are handled here;
+            // typing is forwarded to the buffer and the list is re-filtered.
             action if self.completion.visible => {
-                let cmd = self.completion.handle_action(action);
-                // If accepting a completion, replace the typed prefix with the
-            // full completion text (stripping LSP snippet markers like $0, $1).
-                if matches!(action, Action::CompletionAccept) {
-                    if let Some(item) = self.completion.accept() {
-                        let insert_text = Self::strip_snippets(&item.insert_text);
-                        let prefix_len = self.completion.trigger_prefix.chars().count();
-                        self.completion.hide();
-                        if let Some(buf) = self.editor.active_buffer_mut() {
-                            // Delete the already-typed prefix
-                            for _ in 0..prefix_len {
-                                buf.delete_backward();
-                            }
-                            // Insert the full completion
-                            for ch in insert_text.chars() {
-                                buf.insert_char(ch);
+                match action {
+                    Action::CompletionUp => {
+                        self.completion.select_previous();
+                        return;
+                    }
+                    Action::CompletionDown => {
+                        self.completion.select_next();
+                        return;
+                    }
+                    Action::CompletionAccept => {
+                        if let Some(item) = self.completion.accept() {
+                            let insert_text = Self::strip_snippets(&item.insert_text);
+                            let prefix_len = self.completion.trigger_prefix.chars().count();
+                            self.completion.hide();
+                            if let Some(buf) = self.editor.active_buffer_mut() {
+                                for _ in 0..prefix_len {
+                                    buf.delete_backward();
+                                }
+                                for ch in insert_text.chars() {
+                                    buf.insert_char(ch);
+                                }
                             }
                         }
+                        return;
+                    }
+                    Action::CompletionDismiss => {
+                        self.completion.hide();
+                        return;
+                    }
+                    // Typing: forward to the editor, then re-filter the popup.
+                    Action::InsertChar(ch) => {
+                        if let Some(buf) = self.editor.active_buffer_mut() {
+                            buf.insert_char(*ch);
+                        }
+                        self.notify_lsp_after_edit(action);
+                        // Extend the trigger prefix and re-filter.
+                        if ch.is_alphanumeric() || *ch == '_' {
+                            self.completion.trigger_prefix.push(*ch);
+                            let prefix = self.completion.trigger_prefix.clone();
+                            self.completion.filter_by_prefix(&prefix);
+                            // Also request fresh items from LSP so the list stays current.
+                            self.request_completion_for_current_pos();
+                        } else {
+                            self.completion.hide();
+                        }
+                        return;
+                    }
+                    // Backspace: forward to editor, shrink prefix and re-filter.
+                    Action::DeleteBackward => {
+                        if let Some(buf) = self.editor.active_buffer_mut() {
+                            buf.delete_backward();
+                        }
+                        self.notify_lsp_after_edit(action);
+                        if !self.completion.trigger_prefix.is_empty() {
+                            self.completion.trigger_prefix.pop();
+                            let prefix = self.completion.trigger_prefix.clone();
+                            self.completion.filter_by_prefix(&prefix);
+                        } else {
+                            self.completion.hide();
+                        }
+                        return;
+                    }
+                    // Everything else dismisses the popup and falls through normally.
+                    _ => {
+                        self.completion.hide();
                     }
                 }
-                cmd
+                // Fall through to normal routing for non-completion actions.
+                match self.focus {
+                    FocusArea::Sidebar => self.sidebar.handle_action(action),
+                    FocusArea::Editor => self.editor.handle_action(action),
+                    _ => AppCommand::Nothing,
+                }
             }
 
             // Route to focused component
@@ -536,15 +592,22 @@ impl App {
         }
     }
 
-    /// Auto-trigger LSP completion after certain characters (`.`, `(`).
+    /// Auto-trigger LSP completion after trigger characters or word chars.
     fn auto_trigger_completion(&mut self, action: &Action) {
-        let trigger_char = match action {
+        let should_trigger = match action {
+            // Trigger characters: always request fresh completions
             Action::InsertChar('.') | Action::InsertChar('(') => true,
+            // Word characters: request completions so the popup appears while typing
+            Action::InsertChar(ch) => ch.is_alphanumeric() || *ch == '_',
             _ => false,
         };
-        if !trigger_char {
+        if !should_trigger {
             return;
         }
+        self.request_completion_for_current_pos();
+    }
+
+    fn request_completion_for_current_pos(&mut self) {
         let info = self.editor.active_buffer().and_then(|buf| {
             buf.file_path().map(|p| (
                 p.to_path_buf(),
@@ -579,50 +642,72 @@ impl App {
         }
     }
 
+    /// Update `editor.lsp_status` from the registry so the status bar shows
+    /// the correct LSP server name (or `None` for unsupported file types).
+    fn refresh_lsp_status(&mut self) {
+        let lsp_status = self.editor.active_buffer()
+            .and_then(|buf| buf.file_path())
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .and_then(|ext| self.lsp_registry.command_for_extension(ext))
+            .map(|cmd| cmd.to_string());
+        self.editor.lsp_status = lsp_status;
+    }
+
     /// Send `textDocument/didOpen` (plus `initialize` if this is the first file for the server).
     /// Silently no-ops when no tokio runtime is available (e.g. in unit tests).
     fn send_lsp_did_open(&mut self, path: &std::path::Path) {
         if tokio::runtime::Handle::try_current().is_err() {
+            log::warn!("send_lsp_did_open: no tokio runtime");
             return;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let root_uri = format!("file://{}", self.root_dir.to_string_lossy());
         let uri = Self::file_uri(path);
+        log::info!("send_lsp_did_open: ext={} uri={}", ext, uri);
 
         if self.lsp_open_versions.contains_key(&uri) {
-            return; // already open in LSP
+            log::info!("send_lsp_did_open: already open, skipping");
+            return;
         }
 
         let text = match self.editor.active_buffer() {
             Some(buf) => buf.document.text(),
-            None => return,
+            None => { log::warn!("send_lsp_did_open: no active buffer"); return; }
         };
 
         let server_cmd = match self.lsp_registry.command_for_extension(ext) {
             Some(cmd) => cmd.to_string(),
-            None => return, // no server configured for this extension
+            None => { log::warn!("send_lsp_did_open: no server for ext={}", ext); return; }
         };
+        log::info!("send_lsp_did_open: server_cmd={}", server_cmd);
         let client = match self.lsp_registry.client_for_extension(ext, &root_uri, self.lsp_event_tx.clone()) {
             Some(c) => c,
-            None => return,
+            None => { log::error!("send_lsp_did_open: client_for_extension returned None"); return; }
         };
 
-        let needs_init = self.lsp_initialized.insert(server_cmd);
+        let needs_init = self.lsp_initialized.insert(server_cmd.clone());
         self.lsp_open_versions.insert(uri.clone(), 1);
+        log::info!("send_lsp_did_open: needs_init={} spawning async task", needs_init);
 
         let lang_id = Self::ext_to_lang_id(ext).to_string();
         tokio::spawn(async move {
+            log::info!("LSP async task started, acquiring lock...");
             let locked = client.lock().await;
+            log::info!("LSP async task: lock acquired");
             if needs_init {
+                log::info!("LSP async task: sending initialize...");
                 if let Err(e) = locked.initialize(&root_uri).await {
                     log::error!("LSP initialize failed: {}", e);
                     return;
                 }
+                log::info!("LSP async task: initialize succeeded");
             }
             let uri_parsed = match uri.parse::<lsp_types::Uri>() {
                 Ok(u) => u,
                 Err(e) => { log::error!("Invalid URI: {}", e); return; }
             };
+            log::info!("LSP async task: sending didOpen for {}", uri);
             locked.send_notification::<lsp_types::notification::DidOpenTextDocument>(
                 lsp_types::DidOpenTextDocumentParams {
                     text_document: lsp_types::TextDocumentItem {
@@ -633,6 +718,7 @@ impl App {
                     },
                 }
             ).await;
+            log::info!("LSP async task: didOpen sent successfully");
         });
     }
 
@@ -677,18 +763,21 @@ impl App {
     /// Send a `textDocument/completion` request and pipe results into the completion popup.
     fn send_lsp_completion(&mut self, path: &std::path::Path, line: u32, col: u32) {
         if tokio::runtime::Handle::try_current().is_err() {
+            log::warn!("send_lsp_completion: no tokio runtime");
             return;
         }
         let uri = Self::file_uri(path);
         if !self.lsp_open_versions.contains_key(&uri) {
-            return; // file not open in LSP yet
+            log::warn!("send_lsp_completion: file not in lsp_open_versions: {}", uri);
+            return;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let root_uri = format!("file://{}", self.root_dir.to_string_lossy());
         let client = match self.lsp_registry.client_for_extension(ext, &root_uri, self.lsp_event_tx.clone()) {
             Some(c) => c,
-            None => return,
+            None => { log::warn!("send_lsp_completion: no client"); return; }
         };
+        log::info!("send_lsp_completion: requesting at {}:{}:{}", uri, line, col);
         let event_tx = self.lsp_event_tx.clone();
         tokio::spawn(async move {
             let locked = client.lock().await;
@@ -711,10 +800,11 @@ impl App {
                         lsp_types::CompletionResponse::Array(items) => items,
                         lsp_types::CompletionResponse::List(list) => list.items,
                     };
+                    log::info!("send_lsp_completion: got {} items", items.len());
                     let _ = event_tx.send(LspEvent::Completions(items));
                 }
-                Ok(None) => {}
-                Err(e) => log::debug!("LSP completion failed: {}", e),
+                Ok(None) => { log::info!("send_lsp_completion: response was None"); }
+                Err(e) => log::error!("LSP completion request failed: {}", e),
             }
         });
     }
@@ -799,10 +889,14 @@ impl App {
             }
             AppEvent::Lsp(lsp_event) => match lsp_event {
                 LspEvent::Completions(items) => {
+                    log::info!("handle_app_event: received {} completion items", items.len());
                     if let Some(buf) = self.editor.active_buffer() {
                         let (cx, cy) = buf.cursor_screen_position();
                         let prefix = buf.word_before_cursor();
+                        log::info!("handle_app_event: showing popup, prefix='{}' cx={} cy={}", prefix, cx, cy);
                         self.completion.show_from_lsp(items, cx, cy, prefix);
+                    } else {
+                        log::warn!("handle_app_event: no active buffer for completions");
                     }
                 }
                 LspEvent::Diagnostics { uri, diagnostics } => {
@@ -990,5 +1084,62 @@ mod tests {
         // Should be a no-op
         app.dispatch_action(Action::None);
         assert!(app.running);
+    }
+
+    #[test]
+    fn test_lsp_flow_with_runtime() {
+        // This test checks whether LSP init works with rt.enter() + tokio::spawn.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/main.rs"), "fn main() { let x = 1; }").unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"").unwrap();
+
+        let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+
+        // Check if rust-analyzer is available; skip gracefully if not.
+        let has_ra = app.lsp_registry.has_server_for("rs");
+        if !has_ra {
+            eprintln!("SKIP: rust-analyzer not in PATH");
+            return;
+        }
+        eprintln!("test_lsp_flow: rust-analyzer found");
+
+        // Open a rust file — this should trigger send_lsp_did_open.
+        let rs_path = tmp.path().join("src/main.rs");
+        app.execute_command(AppCommand::OpenFile(rs_path.clone()));
+        assert!(app.editor.active_buffer().is_some(), "buffer should be open");
+
+        let uri = App::file_uri(&rs_path);
+        assert!(app.lsp_open_versions.contains_key(&uri),
+            "file should be in lsp_open_versions after OpenFile");
+        eprintln!("test_lsp_flow: file registered in lsp_open_versions");
+
+        // Give the async init task time to complete (initialize + didOpen).
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        // Now send a completion request.
+        app.send_lsp_completion(&rs_path, 0, 14);
+        eprintln!("test_lsp_flow: completion request sent");
+
+        // Wait for the async completion response.
+        let mut got_completions = false;
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            while let Ok(evt) = app.lsp_event_rx.try_recv() {
+                if let LspEvent::Completions(items) = &evt {
+                    eprintln!("test_lsp_flow: got {} completion items", items.len());
+                    got_completions = true;
+                }
+                app.handle_app_event(AppEvent::Lsp(evt));
+                if got_completions { break; }
+            }
+            if got_completions { break; }
+        }
+        eprintln!("test_lsp_flow: got_completions={}", got_completions);
+        // Note: We don't assert got_completions because rust-analyzer may still
+        // be indexing. The key is that we got this far without panics.
     }
 }

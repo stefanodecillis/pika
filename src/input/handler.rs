@@ -58,7 +58,9 @@ impl InputHandler {
             // Bound sidebar keys (n→FileNew, N→DirNew) are re-mapped inside sidebar.handle_action
             // when input mode is active.
             FocusArea::Sidebar => self.sidebar_fallback(modifiers, code),
-            _ => Action::None,
+            // Completion popup: unbound keys fall back to editor behaviour so
+            // typing characters still inserts them (filtered by dispatch_action).
+            FocusArea::CompletionPopup => self.editor_fallback(modifiers, code),
         }
     }
 

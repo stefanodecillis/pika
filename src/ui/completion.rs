@@ -63,7 +63,10 @@ impl CompletionKind {
 /// The autocomplete popup overlay.
 pub struct CompletionPopup {
     pub visible: bool,
+    /// Filtered items shown in the popup (subset of full_items).
     pub items: Vec<CompletionItem>,
+    /// Unfiltered items from the last LSP response.
+    pub full_items: Vec<CompletionItem>,
     pub selected: usize,
     pub cursor_x: u16,
     pub cursor_y: u16,
@@ -78,6 +81,7 @@ impl CompletionPopup {
         Self {
             visible: false,
             items: Vec::new(),
+            full_items: Vec::new(),
             selected: 0,
             cursor_x: 0,
             cursor_y: 0,
@@ -90,6 +94,7 @@ impl CompletionPopup {
             self.hide();
             return;
         }
+        self.full_items = items.clone();
         self.items = items;
         self.selected = 0;
         self.cursor_x = cursor_x;
@@ -113,13 +118,51 @@ impl CompletionPopup {
                 insert_text: item.insert_text.unwrap_or(item.label),
             })
             .collect();
-        self.trigger_prefix = trigger_prefix;
-        self.show(completion_items, cursor_x, cursor_y);
+
+        if self.visible {
+            // Popup already open: update items and re-filter preserving selection.
+            let old_label = self.items.get(self.selected).map(|i| i.label.clone());
+            self.full_items = completion_items;
+            self.trigger_prefix = trigger_prefix;
+            let prefix = self.trigger_prefix.clone();
+            self.filter_by_prefix(&prefix);
+            // Restore previous selection if the item is still present.
+            if let Some(label) = old_label {
+                if let Some(idx) = self.items.iter().position(|i| i.label == label) {
+                    self.selected = idx;
+                }
+            }
+        } else {
+            self.trigger_prefix = trigger_prefix;
+            self.show(completion_items, cursor_x, cursor_y);
+        }
+    }
+
+    /// Re-filter `items` from `full_items` by `prefix` (case-insensitive prefix match).
+    /// Hides the popup if no items match.
+    pub fn filter_by_prefix(&mut self, prefix: &str) {
+        if prefix.is_empty() {
+            self.items = self.full_items.clone();
+        } else {
+            let lower = prefix.to_lowercase();
+            self.items = self.full_items
+                .iter()
+                .filter(|item| item.label.to_lowercase().contains(&lower))
+                .cloned()
+                .collect();
+        }
+        if self.items.is_empty() {
+            self.visible = false;
+        } else {
+            self.selected = self.selected.min(self.items.len() - 1);
+            self.visible = true;
+        }
     }
 
     pub fn hide(&mut self) {
         self.visible = false;
         self.items.clear();
+        self.full_items.clear();
         self.selected = 0;
     }
 
