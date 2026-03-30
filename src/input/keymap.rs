@@ -157,6 +157,7 @@ impl Default for KeymapSet {
         sidebar.bind(KeyModifiers::NONE, KeyCode::Delete, Action::FileDelete);
         sidebar.bind(KeyModifiers::NONE, KeyCode::Backspace, Action::FileDelete);
         sidebar.bind(KeyModifiers::NONE, KeyCode::F(2), Action::FileRename);
+        sidebar.bind(KeyModifiers::NONE, KeyCode::Char('r'), Action::FileRename);
         sidebar.bind(KeyModifiers::NONE, KeyCode::Char('n'), Action::FileNew);
         sidebar.bind(KeyModifiers::SHIFT, KeyCode::Char('N'), Action::DirNew);
         sidebar.bind(KeyModifiers::CONTROL, KeyCode::Char('c'), Action::FileCopy);
@@ -409,6 +410,7 @@ mod tests {
         let set = default_set();
         assert_eq!(set.sidebar.get(KeyModifiers::NONE, KeyCode::Delete), Some(&Action::FileDelete));
         assert_eq!(set.sidebar.get(KeyModifiers::NONE, KeyCode::F(2)), Some(&Action::FileRename));
+        assert_eq!(set.sidebar.get(KeyModifiers::NONE, KeyCode::Char('r')), Some(&Action::FileRename));
         assert_eq!(set.sidebar.get(KeyModifiers::NONE, KeyCode::Char('n')), Some(&Action::FileNew));
         assert_eq!(set.sidebar.get(KeyModifiers::SHIFT, KeyCode::Char('N')), Some(&Action::DirNew));
     }

@@ -344,6 +344,13 @@ mod tests {
         assert_eq!(h.handle_event(&ev, FocusArea::Sidebar), Action::FileNew);
     }
 
+    #[test]
+    fn test_sidebar_r_triggers_file_rename() {
+        let h = handler();
+        let ev = press(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(h.handle_event(&ev, FocusArea::Sidebar), Action::FileRename);
+    }
+
     // -- Completion popup --
 
     #[test]

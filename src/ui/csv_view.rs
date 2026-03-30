@@ -383,7 +383,14 @@ impl CsvView {
                             format!("{}|", self.edit_buffer)
                         } else {
                             let raw = row_data.get(ci).map(|s| s.as_str()).unwrap_or("");
-                            Self::truncate(raw, w.saturating_sub(1))
+                            let truncated = Self::truncate(raw, w.saturating_sub(1));
+                            // Pad empty selected cells with spaces so the
+                            // background highlight is visible.
+                            if is_selected && truncated.is_empty() {
+                                " ".repeat(w.saturating_sub(1).max(1))
+                            } else {
+                                truncated
+                            }
                         };
 
                         let style = if is_selected && self.editing {

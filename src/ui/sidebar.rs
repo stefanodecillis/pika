@@ -200,6 +200,10 @@ impl Component for Sidebar {
                     self.handle_input_char('N');
                     return AppCommand::Nothing;
                 }
+                Action::FileRename => {
+                    self.handle_input_char('r');
+                    return AppCommand::Nothing;
+                }
                 Action::InsertNewline | Action::TreeOpen => {
                     // Confirm input
                     let input = self.input_buffer.clone();
@@ -461,6 +465,23 @@ mod tests {
         sidebar.handle_action(&Action::DirNew);
         assert!(sidebar.new_file_input.is_some());
         assert!(sidebar.new_file_input.as_ref().unwrap().1); // is a dir
+    }
+
+    #[test]
+    fn test_rename_mode_can_type_r() {
+        let tmp = setup_test_dir();
+        let mut sidebar = Sidebar::new(tmp.path(), 30).unwrap();
+        sidebar.tree.toggle_expand();
+        sidebar.tree.select_next();
+
+        // Enter rename mode
+        sidebar.handle_action(&Action::FileRename);
+        assert!(sidebar.rename_input.is_some());
+        let original = sidebar.input_buffer.clone();
+
+        // FileRename action in input mode should insert 'r'
+        sidebar.handle_action(&Action::FileRename);
+        assert_eq!(sidebar.input_buffer, format!("{}r", original));
     }
 
     #[test]

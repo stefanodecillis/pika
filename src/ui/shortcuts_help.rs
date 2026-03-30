@@ -215,7 +215,7 @@ impl ShortcutsHelp {
         lines.push(shortcut("Ctrl+X", "Cut file (move)"));
         lines.push(shortcut("Ctrl+V", "Paste file"));
         lines.push(shortcut("Delete", "Delete file (to trash)"));
-        lines.push(shortcut("F2", "Rename file"));
+        lines.push(shortcut("R / F2", "Rename file"));
         lines.push(shortcut("N", "New file"));
         lines.push(shortcut("Shift+N", "New directory"));
         lines.push(Line::from(""));
